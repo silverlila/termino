@@ -70,6 +70,4 @@ The application is split into client and server modules:
    /exit
    ```
 
-## Contribute
 
-Contributions are always welcome! Please ensure you follow the code style and test your changes before creating a pull request.
