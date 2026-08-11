@@ -162,8 +162,13 @@ async function runClient(command: ClientCommand): Promise<void> {
 }
 
 async function runServe(command: ServeCommand): Promise<void> {
-  // Stage 4 replaces this with the Bun WebSocket relay.
-  stdout.write(`termino: relay not wired up yet — would listen on port ${command.port}\n`);
+  // Imported here rather than at the top of the file so that running the
+  // client never loads relay code at all. The relay is a separate deployable;
+  // the only thing the two share is the wire format.
+  const { startRelay } = await import("../server/relay.ts");
+
+  const server = startRelay({ port: command.port });
+  stdout.write(`termino relay listening on ws://localhost:${server.port}\n`);
 }
 
 export async function main(argv: string[]): Promise<number> {
