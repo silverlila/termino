@@ -1,0 +1,5 @@
+node_modules/
+.DS_Store
+specs/
+
+# bun.lock is committed deliberately — it pins the pre-1.0 OpenTUI builds.

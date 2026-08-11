@@ -1,0 +1,28 @@
+{
+  "name": "termino",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "module": "src/main.ts",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "start:relay": "bun run src/main.ts serve",
+    "typecheck": "tsc --noEmit",
+    "check:no-deno": "if grep -rqE 'deno\\.land|Deno\\.' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=specs .; then echo 'Deno references remain'; exit 1; fi",
+    "check:relay-pure": "if grep -rqE \"from ['\\\"].*crypto/\" src/server/; then echo 'relay imports crypto'; exit 1; fi",
+    "check:readme": "grep -A 20 'does not protect you against' README.md | grep -q 'forward secrecy'"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.3.0",
+    "@noble/hashes": "^2.3.0",
+    "@opentui/core": "0.5.1",
+    "@opentui/react": "0.5.1",
+    "react": "^19.2.0",
+    "react-devtools-core": "^7.0.1",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.18",
+    "typescript": "^5.9.3"
+  }
+}
