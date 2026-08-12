@@ -227,17 +227,21 @@ describe("presence", () => {
 });
 
 describe("rate limiting", () => {
-  it("drops the sixth message in a window and tells only that sender", async () => {
+  /** The bucket covers every frame the relay acts on, and subscribing is one
+   * of them — so a freshly subscribed connection has spent a token already. */
+  const MESSAGES_AFTER_SUBSCRIBING = RATE_LIMIT_MESSAGES - 1;
+
+  it("drops the message past the window's budget and tells only that sender", async () => {
     const alice = await subscribed();
     const bob = await subscribed();
 
-    for (let sent = 0; sent < RATE_LIMIT_MESSAGES + 1; sent++) {
+    for (let sent = 0; sent < MESSAGES_AFTER_SUBSCRIBING + 1; sent++) {
       alice.send(msgFrame(HANDLE, NONCE, CIPHERTEXT));
     }
     await until(() => framesOfType(alice, "err").length === 1);
     await settle();
 
-    expect(framesOfType(bob, "msg")).toHaveLength(RATE_LIMIT_MESSAGES);
+    expect(framesOfType(bob, "msg")).toHaveLength(MESSAGES_AFTER_SUBSCRIBING);
     expect(framesOfType(alice, "err")).toEqual([{ v: 1, t: "err", code: "rate_limited" }]);
 
     // The other connection has its own bucket and never hears about this.
@@ -252,7 +256,7 @@ describe("rate limiting", () => {
     const alice = await subscribed();
     const bob = await subscribed();
 
-    for (let sent = 0; sent < RATE_LIMIT_MESSAGES + 1; sent++) {
+    for (let sent = 0; sent < MESSAGES_AFTER_SUBSCRIBING + 1; sent++) {
       alice.send(msgFrame(HANDLE, NONCE, CIPHERTEXT));
     }
     await until(() => framesOfType(alice, "err").length === 1);
@@ -260,9 +264,26 @@ describe("rate limiting", () => {
     clock += RATE_LIMIT_WINDOW_MS;
 
     alice.send(msgFrame(HANDLE, NONCE, CIPHERTEXT));
-    await until(() => framesOfType(bob, "msg").length === RATE_LIMIT_MESSAGES + 1);
+    await until(() => framesOfType(bob, "msg").length === MESSAGES_AFTER_SUBSCRIBING + 1);
 
     expect(framesOfType(alice, "err")).toHaveLength(1);
+  });
+
+  it("charges subscriptions too, so handle churn cannot flood a channel", async () => {
+    await subscribed(HANDLE);
+    const mallory = await subscribed(HANDLE);
+
+    // Alternating between two handles defeats the same-handle short circuit,
+    // and every accepted subscribe announces presence to both the handle being
+    // left and the one being joined. Uncharged, that turns a small frame into
+    // a fan-out across every other member of the channel.
+    for (let sent = 0; sent < MESSAGES_AFTER_SUBSCRIBING + 1; sent++) {
+      mallory.send(subFrame(sent % 2 === 0 ? OTHER_HANDLE : HANDLE));
+    }
+    await until(() => framesOfType(mallory, "err").length === 1);
+    await settle();
+
+    expect(framesOfType(mallory, "err")).toEqual([{ v: 1, t: "err", code: "rate_limited" }]);
   });
 });
 

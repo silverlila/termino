@@ -4,8 +4,8 @@
  *
  * This module must never import from `src/crypto/`. The relay imports it, and
  * "the relay cannot decrypt" is meant to be a structural fact rather than a
- * promise — `bun run check:relay-pure` enforces the server half of that, and
- * this comment is the client half.
+ * promise — `bun run check:relay-pure` covers this directory as well as
+ * `server/`, so the rule is enforced rather than merely written down here.
  */
 
 /** Bumped only for a breaking change. Unknown versions are rejected, not ignored. */

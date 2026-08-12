@@ -55,6 +55,33 @@ describe("loadOrCreateIdentity", () => {
     expect(identity.publicKeyHex).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  test("concurrent first runs all end up with the identity that reached disk", async () => {
+    // A genuine race needs separate processes: the check-then-write inside one
+    // process cannot interleave with itself. Each racer prints the key it would
+    // spend its session signing with; every one of them must match the file.
+    //
+    // They wait on a shared wall-clock deadline rather than starting when they
+    // are spawned. Process startup is staggered by more than the window this
+    // race opens, so without the barrier the first racer finishes writing
+    // before the rest look, and the test passes against the bug it is for.
+    const module = join(import.meta.dir, "..", "..", "src", "crypto", "identity.ts");
+    const startAt = Date.now() + 500;
+    const program =
+      `const { loadOrCreateIdentity } = await import(${JSON.stringify(module)});` +
+      `await Bun.sleep(Math.max(0, ${startAt} - Date.now() - 20));` +
+      `while (Date.now() < ${startAt});` +
+      `process.stdout.write(loadOrCreateIdentity(${JSON.stringify(terminoDir)}).publicKeyHex);`;
+
+    const racers = Array.from({ length: 8 }, () =>
+      Bun.spawn(["bun", "-e", program], { stdout: "pipe" }),
+    );
+    const reported = await Promise.all(racers.map((racer) => new Response(racer.stdout).text()));
+
+    const persisted = loadOrCreateIdentity(terminoDir).publicKeyHex;
+
+    expect(new Set(reported)).toEqual(new Set([persisted]));
+  });
+
   test("a corrupt key file reports what to do rather than failing obscurely", () => {
     loadOrCreateIdentity(terminoDir);
     writeFileSync(join(terminoDir, IDENTITY_FILE), "not a key\n");

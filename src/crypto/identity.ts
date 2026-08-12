@@ -41,9 +41,29 @@ export function loadOrCreateIdentity(terminoDir: string = defaultTerminoDir()): 
 
   if (existsSync(path)) return loadIdentity(path);
 
+  return createIdentity(terminoDir, path);
+}
+
+/**
+ * Writes with `wx` — create-exclusively — rather than the default truncating
+ * write. Two termino processes started at once on first run both see the file
+ * missing and both generate a key; without `wx` the second silently overwrites
+ * the first, and the losing process spends its whole session signing with a
+ * key that no longer exists on disk, so its identity rotates behind the user's
+ * back on the next launch. Losing the race is not an error — it just means
+ * somebody else created this device's identity a moment ago, so read theirs.
+ */
+function createIdentity(terminoDir: string, path: string): Identity {
   const secretKey = ed25519.utils.randomSecretKey();
   mkdirSync(terminoDir, { recursive: true, mode: 0o700 });
-  writeFileSync(path, `${bytesToHex(secretKey)}\n`, { mode: 0o600 });
+
+  try {
+    writeFileSync(path, `${bytesToHex(secretKey)}\n`, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return loadIdentity(path);
+  }
+
   // writeFileSync's mode is subject to the process umask, so pin it explicitly.
   chmodSync(path, 0o600);
 

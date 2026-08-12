@@ -172,27 +172,28 @@ async function runServe(command: ServeCommand): Promise<void> {
 }
 
 export async function main(argv: string[]): Promise<number> {
-  let command: Command;
+  // The whole body, not just `parseArgs`: the prompts in `runClient` raise
+  // UsageError too, and that is the path most users reach it by.
   try {
-    command = parseArgs(argv);
+    const command = parseArgs(argv);
+
+    if (command.mode === "help") {
+      stdout.write(HELP);
+      return 0;
+    }
+
+    if (command.mode === "serve") {
+      await runServe(command);
+      return 0;
+    }
+
+    await runClient(command);
+    return 0;
   } catch (error) {
     if (!(error instanceof UsageError)) throw error;
     process.stderr.write(`${error.message}\n`);
     return 2;
   }
-
-  if (command.mode === "help") {
-    stdout.write(HELP);
-    return 0;
-  }
-
-  if (command.mode === "serve") {
-    await runServe(command);
-    return 0;
-  }
-
-  await runClient(command);
-  return 0;
 }
 
 if (import.meta.main) {

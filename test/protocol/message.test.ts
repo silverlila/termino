@@ -16,6 +16,7 @@ import {
 } from "../../src/protocol/message.ts";
 
 const HANDLE = "63402012e8d78d978a4ab491cf2e5ae9";
+const OTHER_HANDLE = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
 const MSG_KEY = new Uint8Array(32).fill(11);
 const OTHER_MSG_KEY = new Uint8Array(32).fill(22);
 
@@ -45,17 +46,17 @@ describe("signed bytes", () => {
     ts: 1786531200000,
   };
   const EXPECTED_JSON =
-    '["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",' +
+    '["63402012e8d78d978a4ab491cf2e5ae9",' +
+    '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",' +
     '"alice","shipping it now",1786531200000]';
 
   it("signs the array form recorded in the wire format", () => {
-    expect(new TextDecoder().decode(signedBytes(FIXED_PAYLOAD))).toBe(EXPECTED_JSON);
+    expect(new TextDecoder().decode(signedBytes(FIXED_PAYLOAD, HANDLE))).toBe(EXPECTED_JSON);
   });
 
-  it("matches the serialization named in the spec", () => {
-    const { from, nick, body, ts } = FIXED_PAYLOAD;
-    expect(signedBytes(FIXED_PAYLOAD)).toEqual(
-      new TextEncoder().encode(JSON.stringify([from, nick, body, ts])),
+  it("covers the channel handle, so a signature does not travel between channels", () => {
+    expect(signedBytes(FIXED_PAYLOAD, HANDLE)).not.toEqual(
+      signedBytes(FIXED_PAYLOAD, OTHER_HANDLE),
     );
   });
 
@@ -66,40 +67,45 @@ describe("signed bytes", () => {
       nick: FIXED_PAYLOAD.nick,
       from: FIXED_PAYLOAD.from,
     };
-    expect(signedBytes(reordered)).toEqual(signedBytes(FIXED_PAYLOAD));
+    expect(signedBytes(reordered, HANDLE)).toEqual(signedBytes(FIXED_PAYLOAD, HANDLE));
   });
 });
 
 describe("signing and verifying", () => {
   it("verifies a payload it just signed", () => {
-    expect(verify(sign(payloadFrom(), SECRET_KEY))).toBe(true);
+    expect(verify(sign(payloadFrom(), HANDLE, SECRET_KEY), HANDLE)).toBe(true);
   });
 
   it("rejects a payload whose body was modified after signing", () => {
-    const signed = sign(payloadFrom(), SECRET_KEY);
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
     const tampered: SignedPayload = { ...signed, body: "cancel the deploy" };
 
-    expect(verify(tampered)).toBe(false);
+    expect(verify(tampered, HANDLE)).toBe(false);
   });
 
   it("rejects a payload whose nick was modified after signing", () => {
-    const signed = sign(payloadFrom(), SECRET_KEY);
-    expect(verify({ ...signed, nick: "bob" })).toBe(false);
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
+    expect(verify({ ...signed, nick: "bob" }, HANDLE)).toBe(false);
   });
 
   it("rejects a payload whose timestamp was modified after signing", () => {
-    const signed = sign(payloadFrom(), SECRET_KEY);
-    expect(verify({ ...signed, ts: signed.ts + 1 })).toBe(false);
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
+    expect(verify({ ...signed, ts: signed.ts + 1 }, HANDLE)).toBe(false);
+  });
+
+  it("rejects a payload presented as belonging to a different channel", () => {
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
+    expect(verify(signed, OTHER_HANDLE)).toBe(false);
   });
 
   it("rejects a signature made by a different key than the one claimed", () => {
-    const impostor = sign(payloadFrom(), OTHER_SECRET_KEY);
+    const impostor = sign(payloadFrom(), HANDLE, OTHER_SECRET_KEY);
     // `from` still names the honest key, so this is an impersonation attempt.
-    expect(verify(impostor)).toBe(false);
+    expect(verify(impostor, HANDLE)).toBe(false);
   });
 
   it("still verifies when the payload object is rebuilt in a different key order", () => {
-    const signed = sign(payloadFrom(), SECRET_KEY);
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
     const reordered: SignedPayload = {
       sig: signed.sig,
       ts: signed.ts,
@@ -108,13 +114,13 @@ describe("signing and verifying", () => {
       from: signed.from,
     };
 
-    expect(verify(reordered)).toBe(true);
+    expect(verify(reordered, HANDLE)).toBe(true);
   });
 
   it("treats a malformed signature as unverified rather than throwing", () => {
-    const signed = sign(payloadFrom(), SECRET_KEY);
-    expect(verify({ ...signed, sig: "!!!not base64!!!" })).toBe(false);
-    expect(verify({ ...signed, sig: "" })).toBe(false);
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
+    expect(verify({ ...signed, sig: "!!!not base64!!!" }, HANDLE)).toBe(false);
+    expect(verify({ ...signed, sig: "" }, HANDLE)).toBe(false);
   });
 });
 
@@ -165,6 +171,31 @@ describe("sealing and opening", () => {
     await expect(openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext))).rejects.toBeInstanceOf(
       PayloadError,
     );
+  });
+});
+
+describe("cross-channel replay", () => {
+  it("refuses a message lifted out of one channel and re-sealed into another", async () => {
+    // Mallory belongs to both channels, so she legitimately holds both message
+    // keys. Alice posts only in the first one.
+    const inChannelA = await sealMessage({
+      msgKey: MSG_KEY,
+      handle: HANDLE,
+      payload: payloadFrom(),
+      secretKey: SECRET_KEY,
+    });
+
+    // Mallory opens it with the key she is entitled to, takes the inner signed
+    // payload untouched — she cannot forge Alice's signature, so she does not
+    // try — and seals that exact payload into her other channel.
+    const plaintext = await open(MSG_KEY, fromBase64(inChannelA.n), fromBase64(inChannelA.c));
+    const { nonce, ciphertext } = await seal(OTHER_MSG_KEY, plaintext);
+    const inChannelB = msgFrame(OTHER_HANDLE, nonce, ciphertext);
+
+    // Bob is in the second channel and holds its key, so the envelope opens.
+    // The signature is what stops him from reading it as a message Alice wrote
+    // to a channel she never joined.
+    await expect(openMessage(OTHER_MSG_KEY, inChannelB)).rejects.toBeInstanceOf(SignatureError);
   });
 });
 

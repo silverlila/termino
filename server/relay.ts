@@ -22,7 +22,7 @@ import {
 
 export const DEFAULT_PORT = 8787;
 
-/** Five messages per ten seconds, keyed on the connection. Never on anything
+/** Five frames per ten seconds, keyed on the connection. Never on anything
  * the client supplies: the previous implementation keyed on a username the
  * client could change at will, which made the limit decorative. */
 export const RATE_LIMIT_MESSAGES = 5;
@@ -86,6 +86,16 @@ export function startRelay(options: RelayOptions = {}) {
         const frame = parse(raw);
 
         if (frame === null) return reject(ws, "bad_frame");
+
+        // Every frame the relay acts on costs a token, not just `msg`. A `sub`
+        // is cheap to send and expensive to serve: each accepted one announces
+        // presence to both the handle being left and the one being joined, so
+        // charging only `msg` left a client free to toggle between two handles
+        // and turn a small frame into a fan-out across every other member.
+        const limit = takeToken(ws.data.bucket, now());
+        ws.data.bucket = limit.bucket;
+        if (!limit.allowed) return reject(ws, "rate_limited");
+
         if (frame.t === "sub") return subscribe(ws, frame);
         return forward(ws, frame, raw);
       },
@@ -128,10 +138,6 @@ export function startRelay(options: RelayOptions = {}) {
     const handle = ws.data.handle;
     if (handle === null) return reject(ws, "not_subscribed");
     if (frame.h !== handle) return reject(ws, "bad_frame");
-
-    const limit = takeToken(ws.data.bucket, now());
-    ws.data.bucket = limit.bucket;
-    if (!limit.allowed) return reject(ws, "rate_limited");
 
     // The raw bytes go out untouched. Re-encoding would work today and would
     // silently start rewriting ciphertext the moment the frame type gains a
