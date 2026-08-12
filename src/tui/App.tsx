@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChannelKeys } from "../../crypto/derive.ts";
-import { fingerprint } from "../../crypto/fingerprint.ts";
-import type { Identity } from "../../crypto/identity.ts";
-import { startSession, type ConnectionState, type Session } from "../session.ts";
+import type { ChannelKeys } from "../../shared/crypto/derive.ts";
+import { fingerprint } from "../../shared/crypto/fingerprint.ts";
+import type { Identity } from "../../shared/crypto/identity.ts";
+import {
+  startSession,
+  type ConnectionState,
+  type DiscardedMessage,
+  type Session,
+} from "../session.ts";
 import type { TrustRecords } from "../trust.ts";
-import { parseComposerInput } from "./commands.ts";
+import { COMMANDS, parseComposerInput } from "./commands.ts";
 import { Composer } from "./Composer.tsx";
 import { MessageList, type Entry, type NoticeTone } from "./MessageList.tsx";
 import { StatusBar } from "./StatusBar.tsx";
@@ -13,7 +18,7 @@ import { StatusBar } from "./StatusBar.tsx";
  * The whole screen. It owns the transcript and the connection state, and it
  * owns the session: `startSession` is called from an effect here, so every
  * callback the session fires lands directly in React state.
- *
+ * 
  * The keys arrive already derived. Derivation costs ~850 ms of argon2id, and
  * paying it here would stall a renderer that is already on screen — so
  * `main.ts` finishes it before this component ever mounts.
@@ -27,14 +32,23 @@ export interface AppProps {
   relayUrl: string;
   /** Where the trust store lives. A parameter so tests do not touch `~`. */
   terminoDir?: string;
+  /** What `/exit` does. The screen decides *when* to leave; tearing down the
+   * renderer and ending the process belongs to whoever built them, which is
+   * `main.ts` — a component that calls `process.exit` cannot be tested. */
+  onExit: () => void;
 }
 
-export function App({ channel, nick, identity, keys, relayUrl, terminoDir }: AppProps) {
-  const chat = useChat({ channel, nick, identity, keys, relayUrl, terminoDir });
+export function App({ channel, nick, identity, keys, relayUrl, terminoDir, onExit }: AppProps) {
+  const chat = useChat({ channel, nick, identity, keys, relayUrl, terminoDir, onExit });
 
   return (
     <box
-      style={{ flexDirection: "column", width: "100%", height: "100%", backgroundColor: "#11141c" }}
+      style={{
+         flexDirection: "column",
+         width: "100%", 
+         height: "100%", 
+         backgroundColor: "#11141c" 
+     }}
     >
       <StatusBar
         channel={channel}
@@ -60,6 +74,11 @@ interface MessageLine {
   kind: "message";
   id: string;
   nick: string;
+  /** The key that signed this line, which is not necessarily the one that
+   * nickname is signing with now — somebody else may have used the name
+   * first. Verification is granted to a key, so the marker is decided
+   * against this rather than against the nickname alone. */
+  from: string;
   body: string;
   ts: number;
   /** Sent from this device. Your own key needs no out-of-band check. */
@@ -123,6 +142,7 @@ function useChat(options: AppProps): Chat {
           append({
             kind: "message",
             nick: message.nick,
+            from: message.from,
             body: message.body,
             ts: message.ts,
             own: false,
@@ -142,6 +162,7 @@ function useChat(options: AppProps): Chat {
         // Both of these are things the user will never get to read. Saying
         // nothing would leave them believing they had heard everything said.
         onDecryptError: (error) => notice(`could not open a message: ${error.message}`),
+        onDiscardedMessage: (discarded) => notice(discardNotice(discarded)),
         onRelayError: (code) => notice(`the relay rejected a message: ${code}`),
       },
     }).then(
@@ -175,7 +196,14 @@ function useChat(options: AppProps): Chat {
 
       active.send(body).then(
         (sent) =>
-          append({ kind: "message", nick: sent.nick, body: sent.body, ts: sent.ts, own: true }),
+          append({
+            kind: "message",
+            nick: sent.nick,
+            from: sent.from,
+            body: sent.body,
+            ts: sent.ts,
+            own: true,
+          }),
         (error: Error) => notice(`could not send: ${error.message}`),
       );
     },
@@ -203,16 +231,30 @@ function useChat(options: AppProps): Chat {
     [notice],
   );
 
+  // Closes the connection before handing back, so the relay sees the departure
+  // and the other members' presence count drops as this screen goes away.
+  const leave = useCallback(() => {
+    session.current?.close();
+    session.current = null;
+    options.onExit();
+  }, [options.onExit]);
+
   const submit = useCallback(
     (line: string) => {
       const input = parseComposerInput(line);
 
       if (input.kind === "unusable") return notice(input.reason);
+      if (input.kind === "exit") return leave();
       if (input.kind === "verify") return verify(input.nick, input.fingerprint);
+
+      if (input.kind === "help") {
+        for (const command of COMMANDS) notice(`${command.usage} — ${command.summary}`);
+        return;
+      }
 
       send(input.body);
     },
-    [notice, send, verify],
+    [leave, notice, send, verify],
   );
 
   // Rebuilt whenever either half changes: the transcript records who spoke and
@@ -226,6 +268,19 @@ function useChat(options: AppProps): Chat {
   return { entries, connection, presence, submit };
 }
 
+/**
+ * What the screen says about a message that was genuine and still not shown.
+ * Both of these are somebody's second copy of one message: the first is a
+ * deliberate act, the second is usually a clock, and the user can only tell
+ * which if the reason is said out loud.
+ */
+function discardNotice({ nick, reason }: DiscardedMessage): string {
+  if (reason === "replayed")
+    return `discarded a second copy of a message from ${nick} — somebody sent it again`;
+
+  return `discarded a message from ${nick} dated outside the freshness window — check both clocks`;
+}
+
 function toEntry(line: TranscriptLine, trust: TrustRecords): Entry {
   if (line.kind === "notice") return line;
 
@@ -235,6 +290,23 @@ function toEntry(line: TranscriptLine, trust: TrustRecords): Entry {
     nick: line.nick,
     body: line.body,
     ts: line.ts,
-    verified: line.own || (trust[line.nick]?.verified ?? false),
+    verified: isVerified(line, trust),
   };
+}
+
+/**
+ * Whether the key that signed this line is one a human has checked.
+ *
+ * The stored key is compared, not only the flag: a nickname somebody else
+ * used first leaves a line on screen signed by a key that was never verified,
+ * and marking it `✓` the moment the real owner is verified would vouch for
+ * exactly the message the marker exists to cast doubt on.
+ */
+function isVerified(line: MessageLine, trust: TrustRecords): boolean {
+  if (line.own) return true;
+
+  const record = trust[line.nick];
+  if (record === undefined) return false;
+
+  return record.verified && record.pubkey === line.from;
 }

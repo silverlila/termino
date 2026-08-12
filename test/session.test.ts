@@ -1,18 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { deriveChannelKeys } from "../../src/crypto/derive.ts";
-import { loadOrCreateIdentity, type Identity } from "../../src/crypto/identity.ts";
-import { encodeFrame, subFrame } from "../../src/protocol/frame.ts";
-import { sealMessage } from "../../src/protocol/message.ts";
-import { removeTempDirs, startTestRelay, tempDir, wait, type TestRelay } from "../support/harness.ts";
+import { deriveChannelKeys } from "../shared/crypto/derive.ts";
+import { loadOrCreateIdentity, type Identity } from "../shared/crypto/identity.ts";
+import { encodeFrame, subFrame } from "../shared/protocol/frame.ts";
+import { sealMessage } from "../shared/protocol/message.ts";
+import { removeTempDirs, startTestRelay, tempDir, wait, type TestRelay } from "./support/harness.ts";
 import {
   startSession,
   type ConnectionState,
+  type DiscardedMessage,
   type IncomingMessage,
   type Session,
   type SessionHandlers,
   type TrustEvent,
-} from "../../src/client/session.ts";
+} from "../src/session.ts";
 
 const CHANNEL_NAME = "stage-five";
 const PASSWORD = "correct horse battery staple";
@@ -25,6 +26,7 @@ const WRONG_CHANNEL = deriveChannelKeys(CHANNEL_NAME, WRONG_PASSWORD);
 
 let relay: TestRelay;
 let sessions: Session[] = [];
+let rawSockets: WebSocket[] = [];
 
 async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -42,6 +44,7 @@ interface Recorded {
   presence: number[];
   trust: TrustEvent[];
   decryptErrors: Error[];
+  discarded: DiscardedMessage[];
   connection: ConnectionState[];
 }
 
@@ -51,6 +54,7 @@ function recorder(): { handlers: SessionHandlers; got: Recorded } {
     presence: [],
     trust: [],
     decryptErrors: [],
+    discarded: [],
     connection: [],
   };
 
@@ -61,9 +65,25 @@ function recorder(): { handlers: SessionHandlers; got: Recorded } {
       onPresence: (count) => got.presence.push(count),
       onTrustEvent: (event) => got.trust.push(event),
       onDecryptError: (error) => got.decryptErrors.push(error),
+      onDiscardedMessage: (discarded) => got.discarded.push(discarded),
       onConnectionChange: (state) => got.connection.push(state),
     },
   };
+}
+
+/**
+ * A connection that speaks the wire format directly, for the frames a session
+ * would never produce: somebody else's bytes, sent again.
+ *
+ * Closed from `afterEach` alongside the sessions rather than at the end of the
+ * test that opened it — a failing assertion returns through neither, and one
+ * socket left open outlives the whole file.
+ */
+async function openRawSocket(): Promise<WebSocket> {
+  const socket = new WebSocket(relay.url);
+  await new Promise<void>((resolve) => socket.addEventListener("open", () => resolve()));
+  rawSockets.push(socket);
+  return socket;
 }
 
 interface Peer {
@@ -95,11 +115,13 @@ async function joinAs(
 
 beforeEach(() => {
   sessions = [];
+  rawSockets = [];
   relay = startTestRelay();
 });
 
 afterEach(() => {
   for (const session of sessions) session.close();
+  for (const socket of rawSockets) socket.close();
   relay.server.stop(true);
   removeTempDirs();
 });
@@ -242,6 +264,86 @@ describe("impersonation inside a channel", () => {
 
     expect(bob.got.messages).toHaveLength(0);
     socket.close();
+  });
+});
+
+describe("a message played back onto the channel", () => {
+  it("is discarded rather than shown a second time", async () => {
+    const alice = await joinAs("alice");
+    const bob = await joinAs("bob");
+    await until(() => alice.got.presence.includes(2));
+
+    // Eve holds no key and never learns one. All she does is subscribe to a
+    // handle that travels in the clear, keep the bytes she is forwarded, and
+    // send them again — which needs no password at all.
+    const eve = await openRawSocket();
+    const captured: string[] = [];
+    eve.addEventListener("message", (event) => {
+      const raw = String(event.data);
+      if (JSON.parse(raw).t === "msg") captured.push(raw);
+    });
+    eve.send(encodeFrame(subFrame(CHANNEL.handle)));
+    await until(() => alice.got.presence.includes(3));
+
+    await alice.session.send("transfer the funds");
+    await until(() => bob.got.messages.length === 1 && captured.length === 1);
+
+    eve.send(captured[0]!);
+    await settle();
+
+    expect(bob.got.messages).toHaveLength(1);
+    expect(bob.got.discarded).toEqual([{ nick: "alice", reason: "replayed" }]);
+  });
+
+  it("is discarded when it was recorded long enough ago to predate this session", async () => {
+    const alice = await joinAs("alice");
+    const bob = await joinAs("bob");
+    await until(() => alice.got.presence.includes(2));
+
+    // Genuinely alice's, genuinely signed, genuinely for this channel — and a
+    // day old. Nothing this session has seen before, so a set of signatures
+    // this process happens to remember cannot be what refuses it.
+    const yesterday = await sealMessage({
+      msgKey: CHANNEL.msgKey,
+      handle: CHANNEL.handle,
+      payload: {
+        from: alice.identity.publicKeyHex,
+        nick: "alice",
+        body: "transfer the funds",
+        ts: Date.now() - 24 * 60 * 60 * 1000,
+      },
+      secretKey: alice.identity.secretKey,
+    });
+
+    const eve = await openRawSocket();
+    eve.send(encodeFrame(subFrame(CHANNEL.handle)));
+    eve.send(encodeFrame(yesterday));
+    await until(() => bob.got.discarded.length === 1);
+    await settle();
+
+    expect(bob.got.messages).toHaveLength(0);
+    expect(bob.got.discarded).toEqual([{ nick: "alice", reason: "stale" }]);
+    // A message that is never shown never teaches the trust store anything:
+    // otherwise a recording of somebody's old key would raise KEY CHANGED
+    // against the key they hold today.
+    expect(bob.got.trust).toHaveLength(0);
+  });
+
+  it("does not stop somebody sending the same words twice", async () => {
+    const alice = await joinAs("alice");
+    const bob = await joinAs("bob");
+    await until(() => alice.got.presence.includes(2));
+
+    // Two messages, identical but for the timestamp each was sent at — which
+    // is inside what alice signs, so they are two different signatures.
+    await alice.session.send("ok");
+    await until(() => bob.got.messages.length === 1);
+    await wait(5);
+    await alice.session.send("ok");
+    await until(() => bob.got.messages.length === 2);
+
+    expect(bob.got.messages.map((message) => message.body)).toEqual(["ok", "ok"]);
+    expect(bob.got.discarded).toEqual([]);
   });
 });
 

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { DecryptError, open, seal } from "../../src/crypto/seal.ts";
-import { fromBase64, msgFrame } from "../../src/protocol/frame.ts";
+import { DecryptError, open, seal } from "../../../shared/crypto/seal.ts";
+import { fromBase64, msgFrame } from "../../../shared/protocol/frame.ts";
 import {
   openMessage,
   PayloadError,
@@ -13,7 +13,7 @@ import {
   verify,
   type Payload,
   type SignedPayload,
-} from "../../src/protocol/message.ts";
+} from "../../../shared/protocol/message.ts";
 
 const HANDLE = "63402012e8d78d978a4ab491cf2e5ae9";
 const OTHER_HANDLE = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -162,6 +162,36 @@ describe("sealing and opening", () => {
     });
 
     await expect(openMessage(MSG_KEY, forged)).rejects.toBeInstanceOf(SignatureError);
+  });
+
+  it("hands back one spelling of a signature, whatever spelling arrived", async () => {
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
+    // The same 64 bytes with the base64 padding dropped: a different string
+    // that decodes identically, and still verifies.
+    const respelt = { ...signed, sig: signed.sig.replace(/=+$/, "") };
+    const { nonce, ciphertext } = await seal(
+      MSG_KEY,
+      new TextEncoder().encode(JSON.stringify(respelt)),
+    );
+
+    const opened = await openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext));
+
+    // A recipient remembers the signatures it has already shown, so two
+    // spellings of one signature must not read as two different messages.
+    expect(opened.sig).toBe(signed.sig);
+  });
+
+  it("rejects a signature that is not the length of one", async () => {
+    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
+    const truncated = { ...signed, sig: signed.sig.slice(0, 20) };
+    const { nonce, ciphertext } = await seal(
+      MSG_KEY,
+      new TextEncoder().encode(JSON.stringify(truncated)),
+    );
+
+    await expect(openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext))).rejects.toBeInstanceOf(
+      PayloadError,
+    );
   });
 
   it("rejects ciphertext that decrypts to something that is not a payload", async () => {

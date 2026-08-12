@@ -9,7 +9,7 @@
     "start:relay": "bun run src/main.ts serve",
     "typecheck": "tsc --noEmit",
     "check:no-deno": "if grep -rqE 'deno\\.land|Deno\\.' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=specs .; then echo 'Deno references remain'; exit 1; fi",
-    "check:relay-pure": "if [ ! -d server ] || [ ! -f src/protocol/frame.ts ]; then echo 'the paths this check reads are missing; it would pass vacuously'; exit 1; fi; if grep -rqE \"from ['\\\"].*crypto/\" server/ src/protocol/frame.ts; then echo 'relay imports crypto'; exit 1; fi",
+    "check:relay-pure": "if [ ! -d server ] || [ ! -f shared/protocol/frame.ts ]; then echo 'the paths this check reads are missing; it would pass vacuously'; exit 1; fi; if grep -rqE \"from ['\\\"].*crypto/\" server/ shared/protocol/frame.ts; then echo 'relay imports crypto'; exit 1; fi",
     "check:readme": "grep -A 20 'does not protect you against' README.md | grep -q 'forward secrecy'"
   },
   "dependencies": {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { loadTrustRecords } from "../../../src/client/trust.ts";
-import { removeTempDirs, startTestRelay, wait, type TestRelay } from "../../support/harness.ts";
-import { closeChats, joinAs, mountChat, seeOnScreen, submit } from "../../support/tui.tsx";
+import { loadTrustRecords } from "../../src/trust.ts";
+import { removeTempDirs, startTestRelay, wait, type TestRelay } from "../support/harness.ts";
+import { closeChats, joinAs, mountChat, seeOnScreen, submit } from "../support/tui.tsx";
 
 /**
  * Verification as a user meets it: the marker beside a nickname, what
@@ -141,6 +141,29 @@ describe("a nickname whose key has changed", () => {
     expect(frame).not.toContain("✓bob");
     expect(frame).toContain("?bob");
     expect(loadTrustRecords(trustDir).bob?.verified).toBe(false);
+  });
+});
+
+describe("a nickname two keys have spoken under", () => {
+  it("verifies the key, not the nickname: lines the other key signed keep their ?", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+
+    // Somebody claims the name before the real bob has said anything, so this
+    // client's first sighting of "bob" is the wrong key.
+    const impostor = await joinAs("bob", relay.url);
+    await impostor.session.send("send it to this address");
+    await seeOnScreen(screen, "?bob  send it to this address");
+
+    const bob = await joinAs("bob", relay.url);
+    await bob.session.send("that was not me");
+    await seeOnScreen(screen, "!! KEY CHANGED");
+
+    await submit(screen, `/verify bob ${bob.fingerprint}`);
+
+    const frame = await seeOnScreen(screen, "✓bob  that was not me");
+    // Checking bob's fingerprint over the phone says nothing about what a
+    // different key said under his name, and the transcript must not imply it.
+    expect(frame).toContain("?bob  send it to this address");
   });
 });
 

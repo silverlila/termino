@@ -45,12 +45,13 @@ export function Composer({ onSubmit }: ComposerProps) {
         paddingRight: 1,
       }}
     >
-      {/* The placeholder is the only place `/verify` is advertised: a command
-          nobody knows about is a verification nobody performs. */}
+      {/* The placeholder is where the command set is advertised: a command
+          nobody knows about is a verification nobody performs. It points at
+          `/help` rather than listing everything, so it stays one line. */}
       <input
         ref={input}
         focused
-        placeholder="write a message · Enter sends · /verify <nick> <fingerprint>"
+        placeholder="write a message · Enter sends · /help lists commands"
         onSubmit={submit}
       />
     </box>

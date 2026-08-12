@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { fingerprint } from "../crypto/fingerprint.ts";
-import { defaultTerminoDir, PUBLIC_KEY_PATTERN } from "../crypto/identity.ts";
+import { fingerprint } from "../shared/crypto/fingerprint.ts";
+import { PUBLIC_KEY_PATTERN } from "../shared/crypto/identity.ts";
+import { defaultTerminoDir, ensureTerminoDir } from "../shared/termino-dir.ts";
 
 /**
  * Trust On First Use. The channel password is shared by everyone in the
@@ -165,7 +166,7 @@ export function saveTrustRecords(
   records: TrustRecords,
   terminoDir: string = defaultTerminoDir(),
 ): void {
-  mkdirSync(terminoDir, { recursive: true, mode: 0o700 });
+  ensureTerminoDir(terminoDir);
   writeFileSync(knownKeysPath(terminoDir), `${JSON.stringify(records, null, 2)}\n`, {
     mode: 0o600,
   });

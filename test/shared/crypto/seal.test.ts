@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DecryptError, open, seal } from "../../src/crypto/seal.ts";
+import { DecryptError, open, seal } from "../../../shared/crypto/seal.ts";
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);

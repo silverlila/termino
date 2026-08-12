@@ -11,7 +11,7 @@ import {
   presenceFrame,
   subFrame,
   toBase64,
-} from "../../src/protocol/frame.ts";
+} from "../../../shared/protocol/frame.ts";
 
 const HANDLE = "63402012e8d78d978a4ab491cf2e5ae9";
 const NONCE = Uint8Array.from({ length: 12 }, (_, index) => index);

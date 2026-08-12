@@ -159,8 +159,8 @@ async function runClient(command: ClientCommand): Promise<void> {
   // before any renderer exists. argon2id blocks for ~850 ms; paying it with a
   // renderer already on screen would freeze a drawn interface instead of
   // pausing a printed prompt.
-  const { loadOrCreateIdentity } = await import("./crypto/identity.ts");
-  const { deriveChannelKeys } = await import("./crypto/derive.ts");
+  const { loadOrCreateIdentity } = await import("../shared/crypto/identity.ts");
+  const { deriveChannelKeys } = await import("../shared/crypto/derive.ts");
 
   const identity = loadOrCreateIdentity();
   stdout.write("deriving channel keys…\n");
@@ -170,11 +170,21 @@ async function runClient(command: ClientCommand): Promise<void> {
   // the renderer at all: constructing one without a TTY hangs.
   const { createCliRenderer } = await import("@opentui/core");
   const { createElement, createRoot } = await import("@opentui/react");
-  const { App } = await import("./client/tui/App.tsx");
+  const { App } = await import("./tui/App.tsx");
 
   const renderer = await createCliRenderer();
-  createRoot(renderer).render(
-    createElement(App, { channel, nick, identity, keys, relayUrl: command.relay }),
+  const root = createRoot(renderer);
+
+  // `/exit` unwinds what this function built, in the order it was built, so
+  // the terminal is handed back the way it was found.
+  const onExit = () => {
+    root.unmount();
+    renderer.destroy();
+    process.exit(0);
+  };
+
+  root.render(
+    createElement(App, { channel, nick, identity, keys, relayUrl: command.relay, onExit }),
   );
 }
 

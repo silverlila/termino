@@ -2,7 +2,7 @@
  * The outer frame: everything the relay is allowed to see. A handle to route
  * on, and an opaque blob to forward.
  *
- * This module must never import from `src/crypto/`. The relay imports it, and
+ * This module must never import from `shared/crypto/`. The relay imports it, and
  * "the relay cannot decrypt" is meant to be a structural fact rather than a
  * promise — `bun run check:relay-pure` covers this directory as well as
  * `server/`, so the rule is enforced rather than merely written down here.

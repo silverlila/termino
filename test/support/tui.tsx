@@ -1,10 +1,10 @@
 import { testRender } from "@opentui/react/test-utils";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import type { ChannelKeys } from "../../src/crypto/derive.ts";
-import { fingerprint } from "../../src/crypto/fingerprint.ts";
-import { loadOrCreateIdentity } from "../../src/crypto/identity.ts";
-import { startSession, type Session } from "../../src/client/session.ts";
-import { App } from "../../src/client/tui/App.tsx";
+import type { ChannelKeys } from "../../shared/crypto/derive.ts";
+import { fingerprint } from "../../shared/crypto/fingerprint.ts";
+import { loadOrCreateIdentity } from "../../shared/crypto/identity.ts";
+import { startSession, type Session } from "../../src/session.ts";
+import { App } from "../../src/tui/App.tsx";
 import { tempDir, wait } from "./harness.ts";
 
 /**
@@ -39,6 +39,8 @@ export interface Chat {
   /** Where this client's trust store lives, so a test can read what it wrote
    * through the store's own loader rather than parsing the file. */
   trustDir: string;
+  /** One entry per time the screen asked to be closed. */
+  exits: number[];
 }
 
 export interface Peer {
@@ -63,6 +65,9 @@ const peers: Peer[] = [];
 export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
   const identity = loadOrCreateIdentity(tempDir(`id-${nick}`));
   const trustDir = tempDir(`trust-${nick}`);
+  // The real one tears down the renderer and ends the process; a test records
+  // that it was asked to instead, and keeps its screen.
+  const exits: number[] = [];
 
   const screen = await testRender(
     <App
@@ -72,6 +77,7 @@ export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
       keys={CHANNEL_KEYS}
       relayUrl={relayUrl}
       terminoDir={trustDir}
+      onExit={() => exits.push(Date.now())}
     />,
     { width: WIDTH, height: HEIGHT },
   );
@@ -80,7 +86,7 @@ export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
   screens.push(screen);
   await seeOnScreen(screen, "connected");
 
-  return { screen, fingerprint: fingerprint(identity.publicKey), trustDir };
+  return { screen, fingerprint: fingerprint(identity.publicKey), trustDir, exits };
 }
 
 /**

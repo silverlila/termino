@@ -13,7 +13,7 @@ import {
   TrustFileError,
   verifyPeer,
   type TrustRecords,
-} from "../../src/client/trust.ts";
+} from "../src/trust.ts";
 
 const ALICE_KEY = "a".repeat(64);
 const OTHER_KEY = "b".repeat(64);

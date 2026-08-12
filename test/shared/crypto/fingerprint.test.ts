@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { fingerprint } from "../../src/crypto/fingerprint.ts";
-import { WORDLIST } from "../../src/crypto/wordlist.ts";
+import { fingerprint } from "../../../shared/crypto/fingerprint.ts";
+import { WORDLIST } from "../../../shared/crypto/wordlist.ts";
 
 /** Recorded on first implementation. Pins both the byte-to-word mapping and
  * the order of the wordlist, either of which would silently change every

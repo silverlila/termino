@@ -6,7 +6,7 @@ import {
   subFrame,
   toBase64,
   type Frame,
-} from "../../src/protocol/frame.ts";
+} from "../../shared/protocol/frame.ts";
 import {
   fullBucket,
   RATE_LIMIT_MESSAGES,

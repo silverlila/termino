@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IDENTITY_FILE, IdentityFileError, loadOrCreateIdentity } from "../../src/crypto/identity.ts";
+import { IDENTITY_FILE, IdentityFileError, loadOrCreateIdentity } from "../../../shared/crypto/identity.ts";
 
 let terminoDir: string;
 
@@ -64,7 +64,7 @@ describe("loadOrCreateIdentity", () => {
     // are spawned. Process startup is staggered by more than the window this
     // race opens, so without the barrier the first racer finishes writing
     // before the rest look, and the test passes against the bug it is for.
-    const module = join(import.meta.dir, "..", "..", "src", "crypto", "identity.ts");
+    const module = join(import.meta.dir, "..", "..", "..", "shared", "crypto", "identity.ts");
     const startAt = Date.now() + 500;
     const program =
       `const { loadOrCreateIdentity } = await import(${JSON.stringify(module)});` +

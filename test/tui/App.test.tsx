@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { removeTempDirs, startTestRelay, wait, type TestRelay } from "../../support/harness.ts";
+import { COMMANDS } from "../../src/tui/commands.ts";
+import { removeTempDirs, startTestRelay, wait, type TestRelay } from "../support/harness.ts";
 import {
   closeChats,
   joinAs,
   mountChat,
   pressEnter,
   seeOnScreen,
+  submit,
   typeText,
-} from "../../support/tui.tsx";
+} from "../support/tui.tsx";
 
 /**
  * The chat screen itself: what it shows, and — the reason this rewrite
@@ -111,5 +113,51 @@ describe("the chat screen", () => {
     await joinAs("bob", relay.url);
     const frame = await seeOnScreen(screen, "2 here");
     expect(frame).not.toContain("just you");
+  });
+});
+
+describe("/help", () => {
+  it("lists every command, so the set is discoverable without guessing", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+
+    await submit(screen, "/help");
+    const frame = await seeOnScreen(screen, "/exit");
+
+    for (const command of COMMANDS) expect(frame).toContain(command.usage.split(" ")[0]!);
+  });
+
+  it("is not sent to anybody", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+    const bob = await joinAs("bob", relay.url);
+
+    await submit(screen, "/help");
+    await seeOnScreen(screen, "list these commands");
+
+    await wait(100);
+    expect(bob.received).toEqual([]);
+  });
+});
+
+describe("/exit", () => {
+  it("asks to be closed", async () => {
+    const { screen, exits } = await mountChat("alice", relay.url);
+    expect(exits).toHaveLength(0);
+
+    await submit(screen, "/exit");
+
+    expect(exits).toHaveLength(1);
+  });
+
+  it("leaves the channel, so the others stop counting this client", async () => {
+    const alice = await mountChat("alice", relay.url);
+    const bob = await mountChat("bob", relay.url);
+    await seeOnScreen(bob.screen, "2 here");
+
+    await submit(alice.screen, "/exit");
+
+    // The relay publishes presence on every disconnect: bob learning he is
+    // alone again is the proof the socket actually closed, rather than the
+    // screen merely being asked to go away.
+    await seeOnScreen(bob.screen, "just you");
   });
 });

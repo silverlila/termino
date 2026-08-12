@@ -1,8 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { defaultTerminoDir, ensureTerminoDir } from "../termino-dir.ts";
 
 /**
  * A per-device Ed25519 keypair. The channel password is shared by everyone in
@@ -15,10 +15,6 @@ export const IDENTITY_FILE = "identity.key";
 /** How a public key looks everywhere it is written down — on the wire, and in
  * the trust store. One home, so the two can never drift apart. */
 export const PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/;
-
-export function defaultTerminoDir(): string {
-  return join(homedir(), ".termino");
-}
 
 export class IdentityFileError extends Error {
   constructor(readonly path: string, cause: unknown) {
@@ -59,7 +55,7 @@ export function loadOrCreateIdentity(terminoDir: string = defaultTerminoDir()): 
  */
 function createIdentity(terminoDir: string, path: string): Identity {
   const secretKey = ed25519.utils.randomSecretKey();
-  mkdirSync(terminoDir, { recursive: true, mode: 0o700 });
+  ensureTerminoDir(terminoDir);
 
   try {
     writeFileSync(path, `${bytesToHex(secretKey)}\n`, { flag: "wx", mode: 0o600 });

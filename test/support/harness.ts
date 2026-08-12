@@ -8,8 +8,8 @@ import { startRelay } from "../../server/relay.ts";
  * disk to put an identity or a trust store. Nothing here knows anything about
  * termino's behaviour — it only sets up and tears down.
  *
- * It lives outside the mirrored directories on purpose: `test/client/…`
- * matches `src/client/…` file for file, and this matches nothing in `src/`.
+ * It lives outside the mirrored directories on purpose: the rest of `test/`
+ * matches `src/` and `shared/` file for file, and this matches neither.
  */
 
 export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

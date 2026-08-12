@@ -12,6 +12,9 @@ import { fromBase64, msgFrame, toBase64, type MsgFrame } from "./frame.ts";
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 
+/** An Ed25519 signature, before base64. */
+const SIGNATURE_BYTES = 64;
+
 export interface Payload {
   /** The sender's Ed25519 public key, hex. Who the message claims to be from. */
   from: string;
@@ -131,7 +134,7 @@ function parsePayload(text: string): SignedPayload {
     nick: readText(fields.nick, "nick"),
     body: readText(fields.body, "body"),
     ts: readTimestamp(fields.ts),
-    sig: readText(fields.sig, "sig"),
+    sig: readSignature(fields.sig),
   };
 }
 
@@ -140,6 +143,34 @@ function readPublicKey(value: unknown): string {
     throw new PayloadError("from is not a 64-character hex public key");
   }
   return value;
+}
+
+/**
+ * Checks the length, and re-emits the signature in one canonical spelling.
+ *
+ * A recipient tells two copies of one message apart by comparing signatures,
+ * and base64 spells the same bytes more than one way — the padding can be
+ * dropped and it still decodes identically. Somebody in the channel could
+ * otherwise re-seal a message somebody else signed, respelt, and have it
+ * arrive as something newly said. Every comparison downstream is a comparison
+ * of the bytes, because the string is derived from them here.
+ */
+function readSignature(value: unknown): string {
+  if (typeof value !== "string") throw new PayloadError("sig is not a string");
+
+  let signature: Uint8Array;
+  try {
+    signature = fromBase64(value);
+  } catch {
+    // Raised as a payload problem, not a frame one: this is what the envelope
+    // decrypted to, and the frame around it was perfectly well formed.
+    throw new PayloadError("sig is not valid base64");
+  }
+
+  if (signature.length !== SIGNATURE_BYTES)
+    throw new PayloadError(`sig is not ${SIGNATURE_BYTES} bytes`);
+
+  return toBase64(signature);
 }
 
 function readText(value: unknown, field: string): string {

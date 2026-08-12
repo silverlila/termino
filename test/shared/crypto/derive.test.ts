@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { deriveChannelKeys } from "../../src/crypto/derive.ts";
+import { deriveChannelKeys } from "../../../shared/crypto/derive.ts";
 
 /**
  * Known-answer vector, recorded on first implementation against the argon2id

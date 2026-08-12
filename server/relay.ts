@@ -8,7 +8,7 @@ import {
   type ErrorCode,
   type MsgFrame,
   type SubFrame,
-} from "../src/protocol/frame.ts";
+} from "../shared/protocol/frame.ts";
 
 /**
  * The relay. It learns a handle and forwards an opaque blob to everyone else

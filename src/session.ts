@@ -1,13 +1,14 @@
-import { deriveChannelKeys, type ChannelKeys } from "../crypto/derive.ts";
-import type { Identity } from "../crypto/identity.ts";
+import type { ChannelKeys } from "../shared/crypto/derive.ts";
+import type { Identity } from "../shared/crypto/identity.ts";
 import {
   decodeFrame,
   encodeFrame,
   subFrame,
   type ErrorCode,
   type Frame,
-} from "../protocol/frame.ts";
-import { openMessage, sealMessage } from "../protocol/message.ts";
+} from "../shared/protocol/frame.ts";
+import { openMessage, sealMessage } from "../shared/protocol/message.ts";
+import { admit, type SeenMessages } from "./replay.ts";
 import {
   loadTrustRecords,
   observe,
@@ -32,8 +33,6 @@ export interface IncomingMessage {
   body: string;
   ts: number;
   trust: TrustState;
-  /** Whether a human has confirmed this key out of band. */
-  verified: boolean;
 }
 
 export interface OutgoingMessage {
@@ -41,6 +40,12 @@ export interface OutgoingMessage {
   nick: string;
   body: string;
   ts: number;
+}
+
+/** A message that decrypted and verified but was not shown. */
+export interface DiscardedMessage {
+  nick: string;
+  reason: "replayed" | "stale";
 }
 
 export interface TrustEvent {
@@ -65,6 +70,11 @@ export interface SessionHandlers {
    * tampered ciphertext, malformed payload, or a signature that did not
    * verify. The message is discarded either way. */
   onDecryptError?(error: Error): void;
+  /** Fires for an inbound message that was genuine and still not shown: a
+   * repeat of one already delivered, or one dated outside the freshness
+   * window. Announced rather than dropped quietly, because a replay is
+   * somebody's deliberate act and a stale one usually means a wrong clock. */
+  onDiscardedMessage?(discarded: DiscardedMessage): void;
   onRelayError?(code: ErrorCode): void;
   onConnectionChange?(state: ConnectionState): void;
 }
@@ -108,14 +118,6 @@ export interface Session {
   close(): void;
 }
 
-/** Derives the channel keys, then connects. Blocks ~850 ms in argon2id. */
-export async function joinChannel(
-  options: Omit<SessionOptions, "keys"> & { channel: string; password: string },
-): Promise<Session> {
-  const { channel, password, ...rest } = options;
-  return await startSession({ ...rest, keys: deriveChannelKeys(channel, password) });
-}
-
 export async function startSession(options: SessionOptions): Promise<Session> {
   const now = options.now ?? Date.now;
   const handlers = options.handlers ?? {};
@@ -123,6 +125,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
   const { identity, nick } = options;
 
   let records = loadTrustRecords(options.terminoDir);
+  let seen: SeenMessages = new Map();
 
   handlers.onConnectionChange?.("connecting");
   const socket = new WebSocket(options.relayUrl);
@@ -163,14 +166,24 @@ export async function startSession(options: SessionOptions): Promise<Session> {
       return;
     }
 
-    const seen = observe(records, opened.nick, opened.from, now());
-    if (seen.records !== records) {
-      records = seen.records;
+    // Before the trust store, not after: a recording of a key somebody used
+    // last month would otherwise raise KEY CHANGED against the key they hold
+    // today, which is an alarm an attacker could ring at will.
+    const admission = admit(seen, opened.sig, opened.ts, now());
+    if (admission.freshness !== "fresh") {
+      handlers.onDiscardedMessage?.({ nick: opened.nick, reason: admission.freshness });
+      return;
+    }
+    seen = admission.seen;
+
+    const observed = observe(records, opened.nick, opened.from, now());
+    if (observed.records !== records) {
+      records = observed.records;
       saveTrustRecords(records, options.terminoDir);
       handlers.onTrustEvent?.({
         nick: opened.nick,
         pubkey: opened.from,
-        state: seen.state,
+        state: observed.state,
         records,
       });
     }
@@ -180,8 +193,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
       nick: opened.nick,
       body: opened.body,
       ts: opened.ts,
-      trust: seen.state,
-      verified: seen.record.verified,
+      trust: observed.state,
     });
   }
 
