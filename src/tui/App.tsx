@@ -44,15 +44,15 @@ export function App({ channel, nick, identity, keys, relayUrl, terminoDir, onExi
   return (
     <box
       style={{
-         flexDirection: "column",
          width: "100%", 
          height: "100%", 
+         flexDirection: "column",
          backgroundColor: "#11141c" 
      }}
     >
       <StatusBar
-        channel={channel}
         nick={nick}
+        channel={channel}
         fingerprint={fingerprint(identity.publicKey)}
         connection={chat.connection}
         presence={chat.presence}
