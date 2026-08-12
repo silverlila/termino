@@ -1,13 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { deriveChannelKeys } from "../../src/crypto/derive.ts";
 import { loadOrCreateIdentity, type Identity } from "../../src/crypto/identity.ts";
 import { encodeFrame, subFrame } from "../../src/protocol/frame.ts";
 import { sealMessage } from "../../src/protocol/message.ts";
-import { startRelay } from "../../server/relay.ts";
+import { removeTempDirs, startTestRelay, tempDir, wait, type TestRelay } from "../support/harness.ts";
 import {
   startSession,
   type ConnectionState,
@@ -26,12 +23,8 @@ const WRONG_PASSWORD = "incorrect horse battery staple";
 const CHANNEL = deriveChannelKeys(CHANNEL_NAME, PASSWORD);
 const WRONG_CHANNEL = deriveChannelKeys(CHANNEL_NAME, WRONG_PASSWORD);
 
-let relay: ReturnType<typeof startRelay>;
-let relayUrl: string;
-let tempDirs: string[] = [];
+let relay: TestRelay;
 let sessions: Session[] = [];
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -43,19 +36,6 @@ async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> 
 
 /** Long enough for anything in flight to land, before asserting absence. */
 const settle = () => wait(150);
-
-/** Bun types `Server.port` as optional; on a listening server it never is. */
-function relayPort(): number {
-  const port = relay.port;
-  if (port === undefined) throw new Error("the relay is not listening");
-  return port;
-}
-
-function tempDir(prefix: string): string {
-  const created = mkdtempSync(join(tmpdir(), `termino-${prefix}-`));
-  tempDirs.push(created);
-  return created;
-}
 
 interface Recorded {
   messages: IncomingMessage[];
@@ -95,7 +75,7 @@ interface Peer {
 async function joinAs(
   nick: string,
   keys = CHANNEL,
-  url = relayUrl,
+  url = relay.url,
 ): Promise<Peer> {
   const identity = loadOrCreateIdentity(tempDir(`id-${nick}`));
   const { handlers, got } = recorder();
@@ -114,16 +94,14 @@ async function joinAs(
 }
 
 beforeEach(() => {
-  tempDirs = [];
   sessions = [];
-  relay = startRelay({ port: 0 });
-  relayUrl = `ws://localhost:${relay.port}/`;
+  relay = startTestRelay();
 });
 
 afterEach(() => {
   for (const session of sessions) session.close();
-  relay.stop(true);
-  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  relay.server.stop(true);
+  removeTempDirs();
 });
 
 describe("two people in a channel", () => {
@@ -254,7 +232,7 @@ describe("impersonation inside a channel", () => {
       secretKey: mallory.secretKey,
     });
 
-    const socket = new WebSocket(relayUrl);
+    const socket = new WebSocket(relay.url);
     await new Promise<void>((resolve) => socket.addEventListener("open", () => resolve()));
     socket.send(encodeFrame(subFrame(CHANNEL.handle)));
     socket.send(encodeFrame(forged));
@@ -370,7 +348,7 @@ describe("what the relay actually receives", () => {
   }
 
   it("sees only a handle and an opaque blob — never the password or a private key", async () => {
-    const wiretap = startWiretap(relayPort());
+    const wiretap = startWiretap(relay.port);
 
     try {
       const alice = await joinAs("alice", CHANNEL, wiretap.url);

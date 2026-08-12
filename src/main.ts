@@ -155,10 +155,27 @@ async function runClient(command: ClientCommand): Promise<void> {
   if (channel === "" || nick === "" || password === "")
     throw new UsageError("channel, nickname and password are all required");
 
-  // Stages 2–6 replace this: derive keys, connect to the relay, mount the TUI.
-  // Key derivation must complete before the renderer starts, so the ~850 ms
-  // argon2id stall never happens with a live renderer on screen.
-  stdout.write(`termino: client not wired up yet — would join "${channel}" as "${nick}" via ${command.relay}\n`);
+  // Everything up to and including derivation happens on the plain terminal,
+  // before any renderer exists. argon2id blocks for ~850 ms; paying it with a
+  // renderer already on screen would freeze a drawn interface instead of
+  // pausing a printed prompt.
+  const { loadOrCreateIdentity } = await import("./crypto/identity.ts");
+  const { deriveChannelKeys } = await import("./crypto/derive.ts");
+
+  const identity = loadOrCreateIdentity();
+  stdout.write("deriving channel keys…\n");
+  const keys = deriveChannelKeys(channel, password);
+
+  // Imported here rather than at the top of the file so `--help` never loads
+  // the renderer at all: constructing one without a TTY hangs.
+  const { createCliRenderer } = await import("@opentui/core");
+  const { createElement, createRoot } = await import("@opentui/react");
+  const { App } = await import("./client/tui/App.tsx");
+
+  const renderer = await createCliRenderer();
+  createRoot(renderer).render(
+    createElement(App, { channel, nick, identity, keys, relayUrl: command.relay }),
+  );
 }
 
 async function runServe(command: ServeCommand): Promise<void> {
