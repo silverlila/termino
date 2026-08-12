@@ -12,8 +12,10 @@ import {
   loadTrustRecords,
   observe,
   saveTrustRecords,
+  verifyPeer,
   type TrustRecords,
   type TrustState,
+  type VerifyOutcome,
 } from "./trust.ts";
 
 /**
@@ -47,6 +49,10 @@ export interface TrustEvent {
   /** Only ever `NEW` or `CHANGED`; `KNOWN` is every other message and would
    * drown the interesting case in noise. */
   state: TrustState;
+  /** The whole store as it now stands. Carried on the event rather than left
+   * for the listener to fetch, so a view rendering trust markers cannot read
+   * a copy from before this event was applied. */
+  records: TrustRecords;
 }
 
 export type ConnectionState = "connecting" | "open" | "closed";
@@ -87,6 +93,18 @@ export interface Session {
   send(body: string): Promise<OutgoingMessage>;
   /** Trust records as they currently stand, for rendering markers. */
   trustRecords(): TrustRecords;
+  /**
+   * Applies `/verify <nick> <fingerprint>`, persists the result, and hands
+   * back what happened along with the store as it now stands — so a view
+   * rendering trust markers never has to ask twice.
+   *
+   * Verification lives behind the session rather than beside it because the
+   * session is the only thing that writes `known_keys.json`. A second writer
+   * holding its own copy of the store would overwrite this flag the next time
+   * any nickname arrived with an unfamiliar key, and the loss would not show
+   * up until the next launch.
+   */
+  verify(nick: string, fingerprint: string): VerifyOutcome;
   close(): void;
 }
 
@@ -149,7 +167,12 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     if (seen.records !== records) {
       records = seen.records;
       saveTrustRecords(records, options.terminoDir);
-      handlers.onTrustEvent?.({ nick: opened.nick, pubkey: opened.from, state: seen.state });
+      handlers.onTrustEvent?.({
+        nick: opened.nick,
+        pubkey: opened.from,
+        state: seen.state,
+        records,
+      });
     }
 
     handlers.onMessage?.({
@@ -179,6 +202,18 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     },
 
     trustRecords: () => records,
+
+    verify(nick: string, claimed: string): VerifyOutcome {
+      // `verifyPeer` returns the store unchanged unless it granted something,
+      // so the caller reads `records` the same way whatever the result was.
+      const outcome = verifyPeer(records, nick, claimed);
+      if (outcome.result !== "verified") return outcome;
+
+      records = outcome.records;
+      saveTrustRecords(records, options.terminoDir);
+      return outcome;
+    },
+
     close: () => socket.close(),
   };
 }

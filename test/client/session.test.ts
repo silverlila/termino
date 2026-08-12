@@ -258,7 +258,20 @@ describe("trust on first use across a live channel", () => {
 
     expect(bob.got.messages.map((message) => message.trust)).toEqual(["NEW", "KNOWN"]);
     expect(bob.got.trust).toEqual([
-      { nick: "alice", pubkey: alice.identity.publicKeyHex, state: "NEW" },
+      {
+        nick: "alice",
+        pubkey: alice.identity.publicKeyHex,
+        state: "NEW",
+        // The event carries the store as it now stands, so a view rendering
+        // trust markers never has to go and fetch a copy of its own.
+        records: {
+          alice: {
+            pubkey: alice.identity.publicKeyHex,
+            verified: false,
+            firstSeen: expect.any(Number),
+          },
+        },
+      },
     ]);
   });
 

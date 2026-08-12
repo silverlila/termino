@@ -6,15 +6,22 @@ import {
   classify,
   knownKeysPath,
   loadTrustRecords,
+  normaliseFingerprint,
   observe,
   saveTrustRecords,
   setVerified,
   TrustFileError,
+  verifyPeer,
   type TrustRecords,
 } from "../../src/client/trust.ts";
 
 const ALICE_KEY = "a".repeat(64);
 const OTHER_KEY = "b".repeat(64);
+
+/** Recorded from `fingerprint.ts`, not recomputed here: a test that derives
+ * the expected value the way the code does can never disagree with it. */
+const ALICE_FINGERPRINT = "tech topic leopard fruit knife brain purple club";
+const OTHER_FINGERPRINT = "fluid parade farm crop quail label census honey";
 
 let terminoDir: string;
 
@@ -141,6 +148,65 @@ describe("marking a peer verified", () => {
   });
 });
 
+describe("verifying a peer against a fingerprint read out of band", () => {
+  const seen = observe({}, "alice", ALICE_KEY, 1000).records;
+
+  it("marks the peer verified when the fingerprint matches the stored key", () => {
+    const outcome = verifyPeer(seen, "alice", ALICE_FINGERPRINT);
+
+    expect(outcome.result).toBe("verified");
+    expect(outcome.records.alice?.verified).toBe(true);
+  });
+
+  it("accepts a fingerprint typed back in the wrong case and spacing", () => {
+    const shouted = `  ${ALICE_FINGERPRINT.toUpperCase().replace(/ /g, "   ")}  `;
+
+    expect(verifyPeer(seen, "alice", shouted).result).toBe("verified");
+  });
+
+  it("changes nothing when the fingerprint belongs to a different key", () => {
+    expect(verifyPeer(seen, "alice", OTHER_FINGERPRINT).result).toBe("mismatch");
+    expect(seen.alice?.verified).toBe(false);
+  });
+
+  it("changes nothing when a single word is wrong", () => {
+    const nearly = ALICE_FINGERPRINT.replace("leopard", "crop");
+
+    expect(verifyPeer(seen, "alice", nearly).result).toBe("mismatch");
+  });
+
+  it("reports a nickname it has never seen a key for", () => {
+    expect(verifyPeer(seen, "mallory", ALICE_FINGERPRINT).result).toBe("unknown-nick");
+  });
+
+  it("verifies only the nickname named", () => {
+    const withBob = observe(seen, "bob", OTHER_KEY, 1000).records;
+    const outcome = verifyPeer(withBob, "alice", ALICE_FINGERPRINT);
+
+    expect(outcome.result).toBe("verified");
+    expect(outcome.records.alice?.verified).toBe(true);
+    expect(outcome.records.bob?.verified).toBe(false);
+  });
+
+  it("stops trusting a verified nickname once its key changes", () => {
+    const outcome = verifyPeer(seen, "alice", ALICE_FINGERPRINT);
+    expect(outcome.result).toBe("verified");
+
+    const changed = observe(outcome.records, "alice", OTHER_KEY, 2000);
+    expect(changed.state).toBe("CHANGED");
+    expect(changed.record.verified).toBe(false);
+
+    // And the fingerprint that used to be right no longer is.
+    expect(verifyPeer(changed.records, "alice", ALICE_FINGERPRINT).result).toBe("mismatch");
+  });
+});
+
+describe("normaliseFingerprint", () => {
+  it("collapses the things a phone call and a keyboard do not preserve", () => {
+    expect(normaliseFingerprint("  Tech   TOPIC\tleopard ")).toBe("tech topic leopard");
+  });
+});
+
 describe("persistence", () => {
   it("returns an empty store on first run rather than failing", () => {
     expect(loadTrustRecords(terminoDir)).toEqual({});
@@ -192,6 +258,10 @@ describe("persistence", () => {
       "an array": "[]",
       "a record missing verified": '{"alice":{"pubkey":"aa","firstSeen":1}}',
       "a record with the wrong type": '{"alice":{"pubkey":1,"verified":false,"firstSeen":1}}',
+      // `verifyPeer` renders this key as a fingerprint under a keystroke, so a
+      // hand-edited one is refused here rather than thrown from the composer.
+      "a record whose pubkey is not a key":
+        '{"alice":{"pubkey":"nope","verified":false,"firstSeen":1}}',
     };
 
     for (const [description, contents] of Object.entries(corrupt)) {

@@ -11,12 +11,13 @@ import type { InputRenderable } from "@opentui/core";
  */
 
 export interface ComposerProps {
-  /** Called with the trimmed line. A blank line is swallowed here rather than
+  /** Called with the trimmed line, which may be a message or a command — this
+   * component does not read it. A blank line is swallowed here rather than
    * sent as an empty message. */
-  onSend: (line: string) => void;
+  onSubmit: (line: string) => void;
 }
 
-export function Composer({ onSend }: ComposerProps) {
+export function Composer({ onSubmit }: ComposerProps) {
   const input = useRef<InputRenderable>(null);
 
   // Reads the draft off the input rather than out of the event: OpenTUI's own
@@ -31,7 +32,7 @@ export function Composer({ onSend }: ComposerProps) {
     composing.value = "";
     if (line === "") return;
 
-    onSend(line);
+    onSubmit(line);
   }
 
   return (
@@ -44,7 +45,14 @@ export function Composer({ onSend }: ComposerProps) {
         paddingRight: 1,
       }}
     >
-      <input ref={input} focused placeholder="write a message · Enter sends" onSubmit={submit} />
+      {/* The placeholder is the only place `/verify` is advertised: a command
+          nobody knows about is a verification nobody performs. */}
+      <input
+        ref={input}
+        focused
+        placeholder="write a message · Enter sends · /verify <nick> <fingerprint>"
+        onSubmit={submit}
+      />
     </box>
   );
 }

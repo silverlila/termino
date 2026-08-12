@@ -20,6 +20,10 @@ export interface MessageEntry {
   verified: boolean;
 }
 
+/** `alarm` is for the one thing a user must not scroll past — a nickname whose
+ * key has changed. Everything else the client says is `info`. */
+export type NoticeTone = "info" | "alarm";
+
 /** Something that happened to the connection rather than something a person
  * said. Kept in the same list so a dropped message appears where the user is
  * already looking instead of scrolling past in a log. */
@@ -28,6 +32,7 @@ export interface NoticeEntry {
   id: string;
   text: string;
   ts: number;
+  tone: NoticeTone;
 }
 
 export type Entry = MessageEntry | NoticeEntry;
@@ -38,6 +43,11 @@ export const UNVERIFIED_MARKER = "?";
 export const VERIFIED_MARKER = "✓";
 
 const TIME_COLUMN_WIDTH = 6;
+
+const NOTICE_COLOR: Record<NoticeTone, string> = {
+  info: "#e0a35c",
+  alarm: "#ff5f5f",
+};
 
 /** Local wall-clock time, fixed width. Hand-rolled rather than
  * `toLocaleTimeString` so the column is exactly five cells in every locale. */
@@ -88,7 +98,7 @@ function MessageText({ entry }: { entry: MessageEntry }) {
 
 function NoticeText({ entry }: { entry: NoticeEntry }) {
   return (
-    <text style={{ flexGrow: 1, fg: "#e0a35c" }} wrapMode="word">
+    <text style={{ flexGrow: 1, fg: NOTICE_COLOR[entry.tone] }} wrapMode="word">
       {entry.text}
     </text>
   );

@@ -1,5 +1,6 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
+import { PUBLIC_KEY_PATTERN } from "../crypto/identity.ts";
 import { open, seal } from "../crypto/seal.ts";
 import { fromBase64, msgFrame, toBase64, type MsgFrame } from "./frame.ts";
 
@@ -8,8 +9,6 @@ import { fromBase64, msgFrame, toBase64, type MsgFrame } from "./frame.ts";
  * sees. Signing happens *before* sealing, so the signature travels inside the
  * envelope — the relay cannot tell who wrote a message, only that one moved.
  */
-
-const PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/;
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 

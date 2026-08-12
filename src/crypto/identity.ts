@@ -12,6 +12,10 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 export const IDENTITY_FILE = "identity.key";
 
+/** How a public key looks everywhere it is written down — on the wire, and in
+ * the trust store. One home, so the two can never drift apart. */
+export const PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/;
+
 export function defaultTerminoDir(): string {
   return join(homedir(), ".termino");
 }
