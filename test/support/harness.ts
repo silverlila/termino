@@ -23,16 +23,22 @@ export interface TestRelay {
 }
 
 /**
+ * Bun types `Server.port` as optional; on a listening server it never is, and
+ * a URL built from `undefined` fails much further downstream.
+ */
+export function portOf(server: ReturnType<typeof startRelay>): number {
+  const port = server.port;
+  if (port === undefined) throw new Error("the test relay is not listening");
+  return port;
+}
+
+/**
  * Starts a relay on an ephemeral port, so a suite run never collides with a
  * relay somebody left running on 8787. Stop it with `server.stop(true)`.
  */
 export function startTestRelay(): TestRelay {
   const server = startRelay({ port: 0 });
-
-  // Bun types `Server.port` as optional; on a listening server it never is,
-  // and a URL built from `undefined` fails much further downstream.
-  const port = server.port;
-  if (port === undefined) throw new Error("the test relay is not listening");
+  const port = portOf(server);
 
   return { server, port, url: `ws://localhost:${port}/` };
 }

@@ -9,11 +9,14 @@ import {
 } from "../../shared/protocol/frame.ts";
 import {
   fullBucket,
+  IDLE_TIMEOUT_SECONDS,
   RATE_LIMIT_MESSAGES,
   RATE_LIMIT_WINDOW_MS,
   startRelay,
   takeToken,
+  type RelayOptions,
 } from "../../server/relay.ts";
+import { portOf } from "../support/harness.ts";
 
 const HANDLE = "63402012e8d78d978a4ab491cf2e5ae9";
 const OTHER_HANDLE = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -24,6 +27,8 @@ const CIPHERTEXT = new TextEncoder().encode("opaque to the relay");
 let clock = 0;
 let relay: ReturnType<typeof startRelay>;
 let clients: TestClient[] = [];
+let cappedRelays: ReturnType<typeof startRelay>[] = [];
+let rawSockets: WebSocket[] = [];
 
 interface TestClient {
   received: Frame[];
@@ -78,14 +83,63 @@ async function subscribed(handle = HANDLE): Promise<TestClient> {
 const framesOfType = (client: TestClient, type: Frame["t"]) =>
   client.received.filter((frame) => frame.t === type);
 
+/**
+ * A second relay with its caps turned down: proving a cap of 1000 holds by
+ * opening 1001 sockets is not a test. Stopped in `afterEach` alongside the
+ * shared one.
+ */
+function startCapped(caps: Pick<RelayOptions, "maxConnections" | "maxConnectionsPerIp">): number {
+  const server = startRelay({ port: 0, now: () => clock, ...caps });
+  cappedRelays.push(server);
+  return portOf(server);
+}
+
+/**
+ * Opens a socket and waits for it to be established, so it is counted by the
+ * time the next assertion runs; rejects if the relay refuses the handshake.
+ * Loopback is spelled `127.0.0.1` rather than `localhost` throughout the
+ * connection-limit cases, because `localhost` may resolve to `::1` and the
+ * per-source cap keys on the address the connection actually arrived from.
+ */
+async function openSocket(port: number, path = "/"): Promise<WebSocket> {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+  rawSockets.push(socket);
+
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve());
+    // A refused handshake surfaces as a close with 1002 ("Expected 101 status
+    // code"), not as an error event — Bun only raises `error` for a socket
+    // that was established and then broke.
+    socket.addEventListener("close", () => reject(new Error("the relay refused the connection")));
+  });
+  return socket;
+}
+
+/** Polls until an ordinary HTTP request gets `status`, so a test can wait for
+ * a slot to come back without guessing how long a close takes to land. */
+async function untilStatus(port: number, status: number, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    const response = await fetch(`http://127.0.0.1:${port}/`);
+    if (response.status === status) return;
+    if (Date.now() > deadline) throw new Error(`the relay never answered ${status}`);
+    await wait(5);
+  }
+}
+
 beforeEach(() => {
   clock = 0;
   clients = [];
+  cappedRelays = [];
+  rawSockets = [];
   relay = startRelay({ port: 0, now: () => clock });
 });
 
 afterEach(() => {
   for (const client of clients) client.close();
+  for (const socket of rawSockets) socket.close();
+  for (const server of cappedRelays) server.stop(true);
   relay.stop(true);
 });
 
@@ -340,6 +394,68 @@ describe("http requests", () => {
   it("refuses a plain http request rather than serving anything", async () => {
     const response = await fetch(`http://localhost:${relay.port}/`);
     expect(response.status).toBe(426);
+  });
+});
+
+describe("connection limits", () => {
+  /** Every refusal answers 429, never merely "some 4xx": a request that is not
+   * an upgrade already gets 426, so a `>= 400` assertion would pass against a
+   * relay with no caps at all. */
+  const REFUSED = 429;
+
+  it("refuses a connection beyond the per-IP cap", async () => {
+    const port = startCapped({ maxConnections: 100, maxConnectionsPerIp: 2 });
+    await openSocket(port);
+    await openSocket(port);
+
+    // The global cap is fifty times higher, so only the per-IP one can refuse.
+    expect((await fetch(`http://127.0.0.1:${port}/`)).status).toBe(REFUSED);
+    await expect(openSocket(port)).rejects.toThrow("refused");
+  });
+
+  it("refuses a connection beyond the global cap", async () => {
+    const port = startCapped({ maxConnections: 2, maxConnectionsPerIp: 10 });
+    await openSocket(port);
+    await openSocket(port);
+
+    // Every test connection comes from one address, so the per-IP cap is set
+    // above the global one: a refusal here can only be the global cap.
+    expect((await fetch(`http://127.0.0.1:${port}/`)).status).toBe(REFUSED);
+    await expect(openSocket(port)).rejects.toThrow("refused");
+  });
+
+  it("frees the slot when a connection closes", async () => {
+    const port = startCapped({ maxConnections: 100, maxConnectionsPerIp: 1 });
+    const first = await openSocket(port);
+    expect((await fetch(`http://127.0.0.1:${port}/`)).status).toBe(REFUSED);
+
+    first.close();
+    await untilStatus(port, 426);
+
+    // 426 means the cap let the request through and it was merely not an
+    // upgrade — the slot came back rather than leaking.
+    await openSocket(port);
+  });
+
+  it("refuses an upgrade on a path other than /", async () => {
+    expect((await fetch(`http://127.0.0.1:${relay.port}/admin`)).status).toBe(REFUSED);
+    await expect(openSocket(portOf(relay), "/admin")).rejects.toThrow("refused");
+  });
+
+  it("refuses an upgrade carrying an Origin header", async () => {
+    const response = await fetch(`http://127.0.0.1:${relay.port}/`, {
+      headers: { origin: "https://a-browser-page.example" },
+    });
+
+    expect(response.status).toBe(REFUSED);
+  });
+
+  it("configures a 120 second idle timeout", () => {
+    // Bun's own default is 120 seconds, so an idle connection behaves the same
+    // whether or not the relay sets it — there is nothing to observe, and the
+    // constant is the assertion. It exists so the value stops moving with the
+    // Bun version.
+    expect(IDLE_TIMEOUT_SECONDS).toBe(120);
   });
 });
 

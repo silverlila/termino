@@ -126,6 +126,11 @@ Read this section before trusting it with anything.
   going quiet.
 - **A compromised device is a compromised channel.** The signing key and the message key are in
   memory on your machine; termino defends the wire, not the endpoint.
+- **The relay can still be crowded out.** It holds at most 1000 connections at once and 10 from
+  any one address, and drops a connection that has gone 120 seconds without a message or a
+  ping — but somebody spread across enough addresses can fill those slots, and nobody already
+  in a channel is protected from a member who floods it. None of that exposes a message; it
+  can stop one arriving.
 
 ## Wire format
 

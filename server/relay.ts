@@ -28,6 +28,21 @@ export const DEFAULT_PORT = 8787;
 export const RATE_LIMIT_MESSAGES = 5;
 export const RATE_LIMIT_WINDOW_MS = 10_000;
 
+/** The token bucket limits what a connection may say; without these, opening
+ * connections is free, so ten thousand of them cost an attacker nothing. */
+export const MAX_CONNECTIONS = 1000;
+export const MAX_CONNECTIONS_PER_IP = 10;
+
+/** Seconds — Bun's unit for this option, which it caps at 960. Bun's own
+ * default is 120 today, so this changes no behaviour; it is stated so the time
+ * a dead connection holds a slot lives in this file rather than in whichever
+ * Bun version happens to be installed. */
+export const IDLE_TIMEOUT_SECONDS = 120;
+
+/** Every request whose source Bun cannot name shares one key rather than being
+ * exempt, so a transport with no address cannot be used to slip the per-IP cap. */
+const UNKNOWN_SOURCE = "unknown";
+
 const TOKENS_PER_MS = RATE_LIMIT_MESSAGES / RATE_LIMIT_WINDOW_MS;
 
 export interface TokenBucket {
@@ -58,6 +73,9 @@ interface Connection {
    * `sub`. Messages are routed by this rather than by the handle in each
    * frame, so a connection can only ever speak into the channel it joined. */
   handle: string | null;
+  /** Remembered from `fetch`, where `server.requestIP` is available, so that
+   * `close` can give the per-source slot back. */
+  source: string;
   bucket: TokenBucket;
 }
 
@@ -66,22 +84,54 @@ export interface RelayOptions {
   /** Injectable so tests can advance past the rate-limit window instead of
    * sleeping ten real seconds, which would exceed Bun's per-test timeout. */
   now?: () => number;
+  /** Injectable for the same reason: proving a cap holds must not mean opening
+   * a thousand sockets. The two are separate because every test connection
+   * arrives from one address, so only an independent global cap can be shown
+   * to be the thing that refused. */
+  maxConnections?: number;
+  maxConnectionsPerIp?: number;
 }
 
 export function startRelay(options: RelayOptions = {}) {
   const now = options.now ?? Date.now;
+  const maxConnections = options.maxConnections ?? MAX_CONNECTIONS;
+  const maxConnectionsPerIp = options.maxConnectionsPerIp ?? MAX_CONNECTIONS_PER_IP;
+
+  let openConnections = 0;
+  const openPerSource = new Map<string, number>();
 
   const server = Bun.serve<Connection, {}>({
     port: options.port ?? DEFAULT_PORT,
 
     fetch(request, server) {
-      const connection: Connection = { handle: null, bucket: fullBucket(now()) };
+      if (new URL(request.url).pathname !== "/") return refuse("only / is served");
+
+      // The CLI sends no Origin header. One arriving means a browser page is
+      // driving the socket, which is not a client this relay serves.
+      if (request.headers.has("origin")) return refuse("no browser clients");
+
+      const source = server.requestIP(request)?.address ?? UNKNOWN_SOURCE;
+      if (openConnections >= maxConnections) return refuse("too many connections");
+      if ((openPerSource.get(source) ?? 0) >= maxConnectionsPerIp) {
+        return refuse("too many connections from this address");
+      }
+
+      const connection: Connection = { handle: null, source, bucket: fullBucket(now()) };
+
+      // Counted before the upgrade rather than in `open`, so a burst of
+      // simultaneous requests cannot all pass a check that nothing has
+      // incremented yet. The slot is given straight back if this turns out not
+      // to be a WebSocket request at all.
+      admit(source);
       if (server.upgrade(request, { data: connection })) return undefined;
+      release(source);
 
       return new Response("termino relay: websocket only\n", { status: 426 });
     },
 
     websocket: {
+      idleTimeout: IDLE_TIMEOUT_SECONDS,
+
       message(ws, raw) {
         const frame = parse(raw);
 
@@ -101,12 +151,36 @@ export function startRelay(options: RelayOptions = {}) {
       },
 
       close(ws) {
+        release(ws.data.source);
+
         // Bun has already removed this socket from the topic by the time close
         // runs, so the count is the post-departure one the survivors want.
         announcePresence(ws.data.handle);
       },
     },
   });
+
+  /** A refusal before the upgrade has no `err` frame available — that frame
+   * type only exists over an established WebSocket — so it answers 429, which
+   * is distinct from the 426 a non-WebSocket request gets. */
+  function refuse(reason: string): Response {
+    return new Response(`termino relay: ${reason}\n`, { status: 429 });
+  }
+
+  function admit(source: string): void {
+    openConnections += 1;
+    openPerSource.set(source, (openPerSource.get(source) ?? 0) + 1);
+  }
+
+  function release(source: string): void {
+    openConnections -= 1;
+
+    // Deleted at zero rather than left there: the key comes from the network,
+    // so an entry kept per address ever seen is its own slow leak.
+    const remaining = (openPerSource.get(source) ?? 1) - 1;
+    if (remaining > 0) openPerSource.set(source, remaining);
+    else openPerSource.delete(source);
+  }
 
   function parse(raw: string | Buffer): SubFrame | MsgFrame | null {
     try {
