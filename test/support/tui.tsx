@@ -3,7 +3,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import type { ChannelKeys } from "../../shared/crypto/derive.ts";
 import { fingerprint } from "../../shared/crypto/fingerprint.ts";
 import { loadOrCreateIdentity } from "../../shared/crypto/identity.ts";
-import { startSession, type Session } from "../../src/session.ts";
+import { startSession, type Session, type SessionHandlers } from "../../src/session.ts";
 import { App } from "../../src/tui/App.tsx";
 import { tempDir, wait } from "./harness.ts";
 
@@ -65,18 +65,23 @@ const peers: Peer[] = [];
 export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
   const identity = loadOrCreateIdentity(tempDir(`id-${nick}`));
   const trustDir = tempDir(`trust-${nick}`);
+  const ownFingerprint = fingerprint(identity.publicKey);
   // The real one tears down the renderer and ends the process; a test records
   // that it was asked to instead, and keeps its screen.
   const exits: number[] = [];
+
+  // The same closure the CLI builds: the keys and the trust directory are
+  // captured here rather than handed to the component, so nothing secret is a
+  // prop in a test either.
+  const connect = (handlers: SessionHandlers) =>
+    startSession({ keys: CHANNEL_KEYS, nick, identity, relayUrl, terminoDir: trustDir, handlers });
 
   const screen = await testRender(
     <App
       channel="demo"
       nick={nick}
-      identity={identity}
-      keys={CHANNEL_KEYS}
-      relayUrl={relayUrl}
-      terminoDir={trustDir}
+      fingerprint={ownFingerprint}
+      connect={connect}
       onExit={() => exits.push(Date.now())}
     />,
     { width: WIDTH, height: HEIGHT },
@@ -86,7 +91,7 @@ export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
   screens.push(screen);
   await seeOnScreen(screen, "connected");
 
-  return { screen, fingerprint: fingerprint(identity.publicKey), trustDir, exits };
+  return { screen, fingerprint: ownFingerprint, trustDir, exits };
 }
 
 /**

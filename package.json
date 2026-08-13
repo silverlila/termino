@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "check:no-deno": "if grep -rqE 'deno\\.land|Deno\\.' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=specs .; then echo 'Deno references remain'; exit 1; fi",
     "check:relay-pure": "if [ ! -d server ] || [ ! -f shared/protocol/frame.ts ]; then echo 'the paths this check reads are missing; it would pass vacuously'; exit 1; fi; if grep -rqE \"from ['\\\"].*crypto/\" server/ shared/protocol/frame.ts; then echo 'relay imports crypto'; exit 1; fi",
-    "check:readme": "grep -A 20 'does not protect you against' README.md | grep -q 'forward secrecy'"
+    "check:readme": "grep -A 20 'does not protect you against' README.md | grep -q 'forward secrecy'",
+    "check:no-secret-props": "test -f src/tui/App.tsx || { echo 'check:no-secret-props: App.tsx missing'; exit 1; }; ! grep -rnE '\\b(secretKey|msgKey)\\b|\\bidentity\\s*[.:,)]|\\bIdentity\\b' src/tui/"
   },
   "dependencies": {
     "@noble/curves": "^2.3.0",

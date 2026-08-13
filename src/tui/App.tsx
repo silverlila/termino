@@ -1,12 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChannelKeys } from "../../shared/crypto/derive.ts";
-import { fingerprint } from "../../shared/crypto/fingerprint.ts";
-import type { Identity } from "../../shared/crypto/identity.ts";
-import {
-  startSession,
-  type ConnectionState,
-  type DiscardedMessage,
-  type Session,
+import type {
+  ConnectionState,
+  DiscardedMessage,
+  Session,
+  SessionHandlers,
 } from "../session.ts";
 import type { TrustRecords } from "../trust.ts";
 import { COMMANDS, parseComposerInput } from "./commands.ts";
@@ -16,30 +13,33 @@ import { StatusBar } from "./StatusBar.tsx";
 
 /**
  * The whole screen. It owns the transcript and the connection state, and it
- * owns the session: `startSession` is called from an effect here, so every
+ * owns the session: the connection is opened from an effect here, so every
  * callback the session fires lands directly in React state.
- * 
- * The keys arrive already derived. Derivation costs ~850 ms of argon2id, and
- * paying it here would stall a renderer that is already on screen — so
- * `main.ts` finishes it before this component ever mounts.
+ *
+ * Nothing secret is a prop. React devtools serialises the props tree to a
+ * local WebSocket when it is switched on, so a key passed down here would be
+ * a key on the wire; the connection arrives as a closure with the keys
+ * captured inside it, which is not serialisable.
  */
 
 export interface AppProps {
   channel: string;
   nick: string;
-  identity: Identity;
-  keys: ChannelKeys;
-  relayUrl: string;
-  /** Where the trust store lives. A parameter so tests do not touch `~`. */
-  terminoDir?: string;
+  /** Own fingerprint, eight words, already rendered — the key that produced
+   * it stays in the closure below. */
+  fingerprint: string;
+  /** Opens the session. Everything secret — the device key, the channel key,
+   * the relay address, where the trust store lives — is captured here rather
+   * than passed, and only the caller that derived them ever holds them. */
+  connect: (handlers: SessionHandlers) => Promise<Session>;
   /** What `/exit` does. The screen decides *when* to leave; tearing down the
    * renderer and ending the process belongs to whoever built them, which is
    * `main.ts` — a component that calls `process.exit` cannot be tested. */
   onExit: () => void;
 }
 
-export function App({ channel, nick, identity, keys, relayUrl, terminoDir, onExit }: AppProps) {
-  const chat = useChat({ channel, nick, identity, keys, relayUrl, terminoDir, onExit });
+export function App({ channel, nick, fingerprint, connect, onExit }: AppProps) {
+  const chat = useChat({ channel, nick, fingerprint, connect, onExit });
 
   return (
     <box
@@ -53,7 +53,7 @@ export function App({ channel, nick, identity, keys, relayUrl, terminoDir, onExi
       <StatusBar
         nick={nick}
         channel={channel}
-        fingerprint={fingerprint(identity.publicKey)}
+        fingerprint={fingerprint}
         connection={chat.connection}
         presence={chat.presence}
       />
@@ -131,13 +131,8 @@ function useChat(options: AppProps): Chat {
   useEffect(() => {
     let mounted = true;
 
-    startSession({
-      keys: options.keys,
-      nick: options.nick,
-      identity: options.identity,
-      relayUrl: options.relayUrl,
-      terminoDir: options.terminoDir,
-      handlers: {
+    options
+      .connect({
         onMessage: (message) =>
           append({
             kind: "message",
@@ -164,23 +159,23 @@ function useChat(options: AppProps): Chat {
         onDecryptError: (error) => notice(`could not open a message: ${error.message}`),
         onDiscardedMessage: (discarded) => notice(discardNotice(discarded)),
         onRelayError: (code) => notice(`the relay rejected a message: ${code}`),
-      },
-    }).then(
-      (started) => {
-        if (!mounted) return started.close();
-        session.current = started;
+      })
+      .then(
+        (started) => {
+          if (!mounted) return started.close();
+          session.current = started;
 
-        // Whatever this device already knew before this session started: a
-        // peer verified last week is marked verified from the first frame,
-        // and the session says nothing about a key it recognises.
-        setTrust(started.trustRecords());
-      },
-      (error: Error) => {
-        if (!mounted) return;
-        setConnection("closed");
-        notice(`could not reach the relay: ${error.message}`);
-      },
-    );
+          // Whatever this device already knew before this session started: a
+          // peer verified last week is marked verified from the first frame,
+          // and the session says nothing about a key it recognises.
+          setTrust(started.trustRecords());
+        },
+        (error: Error) => {
+          if (!mounted) return;
+          setConnection("closed");
+          notice(`could not reach the relay: ${error.message}`);
+        },
+      );
 
     return () => {
       mounted = false;

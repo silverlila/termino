@@ -1,5 +1,6 @@
 import { stdin, stdout } from "node:process";
 import * as readline from "node:readline/promises";
+import type { SessionHandlers } from "./session.ts";
 
 export const DEFAULT_RELAY_URL = "ws://localhost:8787";
 export const DEFAULT_RELAY_PORT = 8787;
@@ -147,6 +148,24 @@ async function promptPassword(question: string): Promise<string> {
   });
 }
 
+/**
+ * Loads the React renderer with `DEV` cleared.
+ *
+ * `@opentui/react` imports `react-devtools-core` at module evaluation time
+ * when `DEV=true`, and devtools serialises the whole element tree — props
+ * included — to a WebSocket on localhost. The variable is cleared *before*
+ * the import because the gate is read as the module evaluates; clearing it
+ * afterwards would be too late.
+ *
+ * Exported so the clearing can be tested on its own: the caller below prompts
+ * on stdin, spends ~850 ms in argon2id and ends in a renderer that hangs
+ * without a TTY, none of which a test can drive.
+ */
+export async function loadRenderer(): Promise<typeof import("@opentui/react")> {
+  delete process.env.DEV;
+  return await import("@opentui/react");
+}
+
 async function runClient(command: ClientCommand): Promise<void> {
   const channel = command.channel ?? (await promptLine("Channel: "));
   const nick = command.nick ?? (await promptLine("Nickname: "));
@@ -161,15 +180,24 @@ async function runClient(command: ClientCommand): Promise<void> {
   // pausing a printed prompt.
   const { loadOrCreateIdentity } = await import("../shared/crypto/identity.ts");
   const { deriveChannelKeys } = await import("../shared/crypto/derive.ts");
+  const { fingerprint } = await import("../shared/crypto/fingerprint.ts");
+  const { startSession } = await import("./session.ts");
 
   const identity = loadOrCreateIdentity();
   stdout.write("deriving channel keys…\n");
   const keys = deriveChannelKeys(channel, password);
 
+  // The screen never holds the device key or the channel key. They are
+  // captured here instead, where the only thing that crosses into React is a
+  // function — and a function is not something devtools can serialise.
+  const connect = (handlers: SessionHandlers) =>
+    startSession({ keys, nick, identity, relayUrl: command.relay, handlers });
+
   // Imported here rather than at the top of the file so `--help` never loads
-  // the renderer at all: constructing one without a TTY hangs.
+  // the renderer at all: constructing one without a TTY hangs. `App.tsx` comes
+  // after `loadRenderer`, because its JSX pulls in `@opentui/react` too.
   const { createCliRenderer } = await import("@opentui/core");
-  const { createElement, createRoot } = await import("@opentui/react");
+  const { createElement, createRoot } = await loadRenderer();
   const { App } = await import("./tui/App.tsx");
 
   const renderer = await createCliRenderer();
@@ -184,7 +212,13 @@ async function runClient(command: ClientCommand): Promise<void> {
   };
 
   root.render(
-    createElement(App, { channel, nick, identity, keys, relayUrl: command.relay, onExit }),
+    createElement(App, {
+      channel,
+      nick,
+      fingerprint: fingerprint(identity.publicKey),
+      connect,
+      onExit,
+    }),
   );
 }
 
