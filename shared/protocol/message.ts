@@ -3,6 +3,7 @@ import { hexToBytes } from "@noble/hashes/utils.js";
 import { PUBLIC_KEY_PATTERN } from "../crypto/identity.ts";
 import { open, seal } from "../crypto/seal.ts";
 import { fromBase64, msgFrame, toBase64, type MsgFrame } from "./frame.ts";
+import { bodyProblem, nickProblem } from "./text.ts";
 
 /**
  * The inner payload: what actually gets encrypted, and what the relay never
@@ -87,13 +88,23 @@ export function verify(signed: SignedPayload, handle: string): boolean {
   }
 }
 
-/** Signs, then encrypts, then wraps in the outer frame — in that order. */
+/**
+ * Signs, then encrypts, then wraps in the outer frame — in that order.
+ *
+ * The text rules are applied here as well as on arrival, so this client cannot
+ * be the one sending a body that every honest recipient will refuse. Refusing
+ * rather than trimming: the signature covers the exact bytes, so a body quietly
+ * rewritten on the way out is one the sender never wrote.
+ */
 export async function sealMessage(input: {
   msgKey: Uint8Array;
   handle: string;
   payload: Payload;
   secretKey: Uint8Array;
 }): Promise<MsgFrame> {
+  const problem = nickProblem(input.payload.nick) ?? bodyProblem(input.payload.body);
+  if (problem !== null) throw new PayloadError(problem);
+
   const signed = sign(input.payload, input.handle, input.secretKey);
   const { nonce, ciphertext } = await seal(input.msgKey, utf8(JSON.stringify(signed)));
   return msgFrame(input.handle, nonce, ciphertext);
@@ -131,8 +142,8 @@ function parsePayload(text: string): SignedPayload {
 
   return {
     from: readPublicKey(fields.from),
-    nick: readText(fields.nick, "nick"),
-    body: readText(fields.body, "body"),
+    nick: readText(fields.nick, "nick", nickProblem),
+    body: readText(fields.body, "body", bodyProblem),
     ts: readTimestamp(fields.ts),
     sig: readSignature(fields.sig),
   };
@@ -173,8 +184,20 @@ function readSignature(value: unknown): string {
   return toBase64(signature);
 }
 
-function readText(value: unknown, field: string): string {
+/**
+ * The last point at which a hostile body can be stopped. Everything below this
+ * treats what comes back as text; `text.ts` decides what text means.
+ */
+function readText(
+  value: unknown,
+  field: string,
+  problemOf: (text: string) => string | null,
+): string {
   if (typeof value !== "string") throw new PayloadError(`${field} is not a string`);
+
+  const problem = problemOf(value);
+  if (problem !== null) throw new PayloadError(problem);
+
   return value;
 }
 

@@ -204,6 +204,78 @@ describe("sealing and opening", () => {
   });
 });
 
+describe("hostile text", () => {
+  /** A frame built from the primitives rather than `sealMessage`, which is
+   * itself one of the things under test here: this is what a patched client,
+   * or somebody speaking the protocol by hand, would put on the wire. */
+  async function sealWithoutChecking(payload: Payload) {
+    const signed = sign(payload, HANDLE, SECRET_KEY);
+    const { nonce, ciphertext } = await seal(
+      MSG_KEY,
+      new TextEncoder().encode(JSON.stringify(signed)),
+    );
+    return msgFrame(HANDLE, nonce, ciphertext);
+  }
+
+  it("rejects a body containing an escape sequence", async () => {
+    // OSC 52: a channel member writing to the reader's system clipboard.
+    const frame = await sealWithoutChecking(
+      payloadFrom({ body: "hi\u001B]52;c;cGF3bmVk\u0007" }),
+    );
+
+    await expect(openMessage(MSG_KEY, frame)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("rejects a body containing a newline", async () => {
+    const frame = await sealWithoutChecking(
+      payloadFrom({ body: "ok\n00:00 ?alice  forged line" }),
+    );
+
+    await expect(openMessage(MSG_KEY, frame)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("rejects a nick containing a control character", async () => {
+    const frame = await sealWithoutChecking(payloadFrom({ nick: "bob\u001B[31m" }));
+
+    await expect(openMessage(MSG_KEY, frame)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("refuses to seal a body that would be rejected on arrival", async () => {
+    // Both directions read one rule, so this client cannot be the one putting
+    // a body on the wire that every honest recipient will refuse.
+    const input = {
+      msgKey: MSG_KEY,
+      handle: HANDLE,
+      payload: payloadFrom({ body: "hi\u001B[2J" }),
+      secretKey: SECRET_KEY,
+    };
+
+    await expect(sealMessage(input)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("refuses to seal an over-long body", async () => {
+    const input = {
+      msgKey: MSG_KEY,
+      handle: HANDLE,
+      payload: payloadFrom({ body: "a".repeat(1901) }),
+      secretKey: SECRET_KEY,
+    };
+
+    await expect(sealMessage(input)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("still seals ordinary non-ASCII text", async () => {
+    const frame = await sealMessage({
+      msgKey: MSG_KEY,
+      handle: HANDLE,
+      payload: payloadFrom({ nick: "zoë", body: "déjà vu — shipping it now 🚀" }),
+      secretKey: SECRET_KEY,
+    });
+
+    expect((await openMessage(MSG_KEY, frame)).body).toBe("déjà vu — shipping it now 🚀");
+  });
+});
+
 describe("cross-channel replay", () => {
   it("refuses a message lifted out of one channel and re-sealed into another", async () => {
     // Mallory belongs to both channels, so she legitimately holds both message
