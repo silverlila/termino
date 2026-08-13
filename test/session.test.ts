@@ -2,15 +2,25 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { startHandshake } from "../shared/crypto/handshake.ts";
 import { deriveHandle, generatePsk } from "../shared/crypto/psk.ts";
 import { decodeFrame, encodeFrame, helloFrame, subFrame } from "../shared/protocol/frame.ts";
-import { startTestRelay, unlimitedClock, wait, type TestRelay } from "./support/harness.ts";
+import {
+  openHostilePeer,
+  startTestRelay,
+  unlimitedClock,
+  wait,
+  type HostilePeer,
+  type TestRelay,
+} from "./support/harness.ts";
 import {
   HANDSHAKE_TIMEOUT_MS,
+  PING_INTERVAL_MS,
+  PRESENCE_EXPIRY_MS,
   SessionClosedError,
   startSession,
   type ConnectionState,
   type IncomingMessage,
   type Session,
   type SessionHandlers,
+  type SessionOptions,
 } from "../src/session.ts";
 
 /**
@@ -38,9 +48,24 @@ const IMPATIENT = 80;
  * fraction of a second, and still nothing like the twenty-second default. */
 const PATIENT = 500;
 
+/**
+ * How fast presence runs when presence is what is under test. Everything else
+ * in this file runs on the real fifteen and forty-five seconds, which never
+ * tick inside a test.
+ */
+type Timings = Pick<SessionOptions, "pingIntervalMs" | "presenceExpiryMs">;
+
+const QUICK_PING_MS = 20;
+const QUICK_EXPIRY_MS = 60;
+const QUICK_PRESENCE: Timings = {
+  pingIntervalMs: QUICK_PING_MS,
+  presenceExpiryMs: QUICK_EXPIRY_MS,
+};
+
 let relay: TestRelay;
 let sessions: Session[] = [];
 let rawSockets: WebSocket[] = [];
+let hostilePeers: HostilePeer[] = [];
 
 async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -56,6 +81,7 @@ const settle = () => wait(150);
 interface Recorded {
   messages: IncomingMessage[];
   joined: string[];
+  gone: number;
   gaps: { nick: string; count: number }[];
   thirdParties: number;
   decryptErrors: Error[];
@@ -66,6 +92,7 @@ function recorder(): { handlers: SessionHandlers; got: Recorded } {
   const got: Recorded = {
     messages: [],
     joined: [],
+    gone: 0,
     gaps: [],
     thirdParties: 0,
     decryptErrors: [],
@@ -77,6 +104,7 @@ function recorder(): { handlers: SessionHandlers; got: Recorded } {
     handlers: {
       onMessage: (message) => got.messages.push(message),
       onPeerJoined: (sasWords) => got.joined.push(sasWords),
+      onPeerGone: () => (got.gone += 1),
       onGap: (nick, count) => got.gaps.push({ nick, count }),
       onThirdParty: () => (got.thirdParties += 1),
       onDecryptError: (error) => got.decryptErrors.push(error),
@@ -90,17 +118,25 @@ interface Peer {
   got: Recorded;
 }
 
-async function joinAs(nick: string, url = relay.url, psk = PSK): Promise<Peer> {
+async function joinAs(
+  nick: string,
+  url = relay.url,
+  psk = PSK,
+  timings: Timings = {},
+): Promise<Peer> {
   const { handlers, got } = recorder();
-  const session = await startSession({ psk, nick, relayUrl: url, handlers });
+  const session = await startSession({ psk, nick, relayUrl: url, handlers, ...timings });
 
   sessions.push(session);
   return { session, got };
 }
 
 /** Both ends of one conversation, established. */
-async function pair(url = relay.url): Promise<{ alice: Peer; bob: Peer }> {
-  const [alice, bob] = await Promise.all([joinAs("alice", url), joinAs("bob", url)]);
+async function pair(url = relay.url, timings: Timings = {}): Promise<{ alice: Peer; bob: Peer }> {
+  const [alice, bob] = await Promise.all([
+    joinAs("alice", url, PSK, timings),
+    joinAs("bob", url, PSK, timings),
+  ]);
   return { alice: alice!, bob: bob! };
 }
 
@@ -225,12 +261,14 @@ function startMeddler(
 beforeEach(() => {
   sessions = [];
   rawSockets = [];
+  hostilePeers = [];
   relay = startTestRelay({ now: unlimitedClock() });
 });
 
 afterEach(() => {
   for (const session of sessions) session.close();
   for (const socket of rawSockets) socket.close();
+  for (const peer of hostilePeers) peer.close();
   relay.server.stop(true);
 });
 
@@ -342,6 +380,26 @@ describe("two people who share an invite", () => {
 
     alice.session.close();
     await until(() => alice.got.connection.includes("closed"));
+  });
+
+  it("says the peer is here only once the session reads as open", async () => {
+    // The two arrays above cannot see the interleaving between them, and the
+    // interleaving is the contract: a caller handed the peer's arrival — and
+    // the words to read aloud with it — must not still be reading this session
+    // as connecting. One log, in the order the callbacks fired.
+    const order: string[] = [];
+    const handlers: SessionHandlers = {
+      onConnectionChange: (state) => order.push(state),
+      onPeerJoined: () => order.push("peer joined"),
+    };
+
+    const [alice] = await Promise.all([
+      startSession({ psk: PSK, nick: "alice", relayUrl: relay.url, handlers }),
+      joinAs("bob"),
+    ]);
+    sessions.push(alice!);
+
+    expect(order).toEqual(["connecting", "open", "peer joined"]);
   });
 
   it("timestamps a message by when it arrived, not by anything the sender said", async () => {
@@ -586,6 +644,90 @@ describe("a gap in the numbering", () => {
     } finally {
       meddler.stop();
     }
+  });
+});
+
+/**
+ * One session with somebody on the other end who completes a real handshake,
+ * confirms, and then says nothing more.
+ *
+ * A real session pings on its own, so a peer that has fallen quiet cannot be
+ * built out of one — this is the only way to watch an expiry lapse. Both ends
+ * are started before either is awaited: the session does not resolve until the
+ * peer has confirmed, and the peer cannot confirm until it has been greeted.
+ */
+async function joinWithQuietPeer(): Promise<{ alice: Peer; peer: HostilePeer }> {
+  const { handlers, got } = recorder();
+  const peerArriving = openHostilePeer(relay.url, PSK);
+  const joining = startSession({
+    psk: PSK,
+    nick: "alice",
+    relayUrl: relay.url,
+    handlers,
+    ...QUICK_PRESENCE,
+  });
+
+  const peer = await peerArriving;
+  hostilePeers.push(peer);
+  await peer.confirm();
+
+  const session = await joining;
+  sessions.push(session);
+
+  return { alice: { session, got }, peer };
+}
+
+describe("a peer's presence", () => {
+  it("pings every fifteen seconds and expires after forty-five", () => {
+    // Three intervals of grace: a couple of pings lost on the way is a network,
+    // not a departure.
+    expect(PING_INTERVAL_MS).toBe(15_000);
+    expect(PRESENCE_EXPIRY_MS).toBe(45_000);
+  });
+
+  it("holds for as long as the peer's pings keep opening, with nothing typed", async () => {
+    const { alice, bob } = await pair(relay.url, QUICK_PRESENCE);
+
+    // Four expiries of an idle conversation. Nobody types, so the only thing
+    // keeping either side present is the other side's pings — and they only
+    // count because they opened under the receiving chain.
+    await wait(QUICK_EXPIRY_MS * 4);
+
+    expect(alice.got.gone).toBe(0);
+    expect(bob.got.gone).toBe(0);
+
+    // A ping reaches nothing on screen, and spends a counter on the sending
+    // chain like any other payload rather than leaving a hole where one was.
+    expect(alice.got.messages).toEqual([]);
+    expect(alice.got.gaps).toEqual([]);
+  });
+
+  it("lapses once the peer stops talking", async () => {
+    const { alice } = await joinWithQuietPeer();
+    expect(alice.got.joined).toHaveLength(1);
+
+    // Not on the first ping that failed to arrive: the silence has to run the
+    // whole expiry before anybody is called gone.
+    await wait(QUICK_EXPIRY_MS / 2);
+    expect(alice.got.gone).toBe(0);
+
+    await until(() => alice.got.gone === 1);
+  });
+
+  it("comes back when the peer speaks again", async () => {
+    const { alice, peer } = await joinWithQuietPeer();
+    await until(() => alice.got.gone === 1);
+
+    // Asserted the moment it lands rather than after a settle: this peer falls
+    // silent again immediately, so waiting would only watch it go a second
+    // time.
+    await peer.send({ t: "text", nick: "mallory", body: "still here" });
+    await until(() => alice.got.messages.length === 1);
+
+    // The same session and the same words, said twice: this is somebody the
+    // relay had stopped carrying, not somebody new to compare words with.
+    expect(alice.got.joined).toEqual([alice.session.sasWords, alice.session.sasWords]);
+    expect(alice.got.gone).toBe(1);
   });
 });
 

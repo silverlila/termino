@@ -51,9 +51,15 @@ export type ConnectionState = "connecting" | "open" | "closed";
 
 export interface SessionHandlers {
   onMessage?(message: IncomingMessage): void;
-  /** The handshake completed and the peer's confirm opened. Carries the eight
-   * words both people read aloud to each other. */
+  /** The peer is here: their confirm opened, or they spoke again after having
+   * been reported gone. Carries the eight words both people read aloud to each
+   * other, which do not change for the life of the session. */
   onPeerJoined?(sasWords: string): void;
+  /** A whole expiry has passed with nothing authenticated opening. Said from
+   * the absence of the peer's own pings, so a relay that withholds traffic
+   * shows up as the peer going quiet rather than being able to assert they are
+   * still there. */
+  onPeerGone?(): void;
   /** Messages that were stepped over and never turned up, counted once the
    * message after them has arrived. */
   onGap?(nick: string, count: number): void;
@@ -80,6 +86,10 @@ export interface SessionOptions {
   handlers?: SessionHandlers;
   /** Injectable so a test of the failure paths does not sleep twenty seconds. */
   handshakeTimeoutMs?: number;
+  /** Both injectable for the same reason: presence is measured in tens of
+   * seconds, and a test of it would otherwise be spent asleep. */
+  pingIntervalMs?: number;
+  presenceExpiryMs?: number;
 }
 
 export interface Session {
@@ -119,6 +129,14 @@ export class SessionClosedError extends Error {
  * that a wrong invite does not look like a hang. */
 export const HANDSHAKE_TIMEOUT_MS = 20_000;
 
+/** How often this client says it is still here. */
+export const PING_INTERVAL_MS = 15_000;
+
+/** How long the peer's silence runs before they are reported gone. Three
+ * intervals of grace, so a couple of pings lost on the way do not read as
+ * somebody leaving the conversation. */
+export const PRESENCE_EXPIRY_MS = 45_000;
+
 /** The two ways a handshake ends badly, said apart on purpose: one is a
  * conversation nobody has joined yet, the other is an alarm. They travel on the
  * error, so a caller reads them the same way it reads any other failure. */
@@ -130,6 +148,8 @@ export async function startSession(options: SessionOptions): Promise<Session> {
   const handlers = options.handlers ?? {};
   const { nick, psk } = options;
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+  const pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS;
+  const presenceExpiryMs = options.presenceExpiryMs ?? PRESENCE_EXPIRY_MS;
   const handle = deriveHandle(psk);
 
   handlers.onConnectionChange?.("connecting");
@@ -152,6 +172,12 @@ export async function startSession(options: SessionOptions): Promise<Session> {
   let peerNick: string | null = null;
   let established = false;
   let closed = false;
+
+  /** Whether the peer counts as here, and when they were last heard from.
+   * Both move only on a payload that opened, which is the whole point: the
+   * relay can delay or drop one, and cannot write one. */
+  let peerPresent = false;
+  let peerLastHeard = 0;
 
   /** Gaps already counted, so the same missing message is reported once and
    * not again on every message that follows it. */
@@ -283,6 +309,14 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     // peer that skipped the one payload proving both ends agree. Said out
     // loud rather than shown: it opened, and it is still not something to put
     // on screen under somebody's name.
+    //
+    // A ping is no exception, and deliberately so. It would be the one payload
+    // that reaches nothing visible, which makes it exactly the one worth
+    // letting through — and letting it through would let a peer that never
+    // confirmed advertise itself as present. Presence is a claim about a peer
+    // that has been established, so it waits for the confirm like everything
+    // else. A ping refused here costs nothing: the next one is one interval
+    // away.
     if (!established && payload.t !== "confirm") {
       return handlers.onDecryptError?.(
         new Error("a message arrived before the session was established"),
@@ -297,19 +331,72 @@ export async function startSession(options: SessionOptions): Promise<Session> {
   function deliver(payload: Payload): void {
     peerNick = payload.nick;
 
-    if (payload.t === "confirm") {
-      if (established) return;
+    // Whatever it says, it opened under the receiving chain, and only the peer
+    // holds the other end of that. That is the whole of authenticated
+    // presence — and it is why a `text` counts for it as much as a `ping`
+    // does: somebody typing is not somebody who has gone.
+    peerLastHeard = Date.now();
 
-      established = true;
-      clearTimeout(timer);
-      handlers.onConnectionChange?.("open");
-      handlers.onPeerJoined?.(sasWords);
-      return confirm();
-    }
+    // Establishing comes first, and the order is the contract: a caller told
+    // the peer is here — and handed the words to read aloud — must not still
+    // be reading this session as connecting. Everything else can only arrive
+    // once the session is established, because the guard above refuses it.
+    if (payload.t === "confirm") establish();
+
+    markPeerPresent();
 
     if (payload.t === "text") {
       handlers.onMessage?.({ nick: payload.nick, body: payload.body, ts: Date.now() });
     }
+
+    // A ping carries nothing but the fact that it opened, which is recorded
+    // above and is the only reason it was sent.
+  }
+
+  /** The peer's confirm, opened: the one payload that proves both ends reached
+   * the same keys, and the point at which this session exists. A second one
+   * changes nothing — a peer sends exactly one, at counter 0. */
+  function establish(): void {
+    if (established) return;
+
+    established = true;
+    clearTimeout(timer);
+    handlers.onConnectionChange?.("open");
+    confirm();
+  }
+
+  /** The peer, here. Coming back after having been reported gone is the same
+   * event as arriving — the session is the one that was already running, and
+   * the words to read aloud are the ones it started with. */
+  function markPeerPresent(): void {
+    if (peerPresent) return;
+
+    peerPresent = true;
+    handlers.onPeerJoined?.(sasWords);
+  }
+
+  /**
+   * Every interval: say we are still here, and ask whether they still are.
+   *
+   * One timer, because presence is one fact read from both directions, and
+   * checking on the ping interval is what bounds how late the news can be: a
+   * peer that goes quiet is reported within one interval of their expiry
+   * lapsing, rather than whenever something else happens to arrive.
+   *
+   * A ping spends a counter on the sending chain like any other payload. That
+   * is intended: an idle session keeps ratcheting, and every key it steps over
+   * is one nobody can recompute.
+   */
+  function beat(): void {
+    if (peerPresent && Date.now() - peerLastHeard > presenceExpiryMs) {
+      peerPresent = false;
+      handlers.onPeerGone?.();
+    }
+
+    // A ping that cannot leave needs no announcement of its own: the far end's
+    // own expiry reports it, which is the same news said to the side that can
+    // do something about it.
+    void send({ t: "ping", nick }).catch(() => undefined);
   }
 
   /**
@@ -415,6 +502,11 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     throw error;
   }
 
+  // Started only once there is somebody to be present to, and cleared in
+  // close() — an interval nobody clears keeps the process alive after the
+  // conversation has ended.
+  const heartbeat = setInterval(beat, pingIntervalMs);
+
   return {
     handle,
     sasWords,
@@ -426,6 +518,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
 
     close(): Uint8Array[] {
       clearTimeout(timer);
+      clearInterval(heartbeat);
       const overwritten = wipe();
       socket.close();
       return overwritten;
