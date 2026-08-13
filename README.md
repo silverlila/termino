@@ -26,6 +26,12 @@ The password is prompted for on stdin and never echoed. It is **never** accepted
 that would put it in your shell history and in the output of `ps`. Run `bun run start -- --help`
 for the full flag set.
 
+`--relay` says which relay to join. A value with no scheme is read as `wss://`, and plain
+`ws://` is refused for every host but `localhost`, `127.0.0.1` and `[::1]` — nothing
+authenticates a relay, so an unencrypted connection to a remote one can be dropped or delayed
+by anyone on the path. `--insecure` accepts that and connects anyway, which is for a relay you
+are tunnelling to yourself. Any other scheme is a usage error rather than a silent rewrite.
+
 Joining takes about a second. That pause is argon2id, and it is the entire reason a weak
 channel password is not trivially guessable — see *Wire format*.
 
@@ -105,9 +111,10 @@ Read this section before trusting it with anything.
   Traffic analysis is not defended against at all.
 - **Anyone with the password is in the channel.** There are no invites and no membership: the
   password *is* the door. You find out somebody joined from the participant count.
-- **The transport is plain `ws://` by default.** Message contents stay encrypted regardless, but
-  nothing authenticates the relay you connect to, and a network attacker can drop or delay your
-  messages.
+- **Nothing authenticates the relay.** Message contents stay encrypted regardless of transport,
+  but a network attacker on the path can drop or delay your messages. Plain `ws://` is allowed
+  only to loopback, and to a remote host only under `--insecure`; everything else must be
+  `wss://`, which at least proves you reached the host you named.
 - **A nickname is not an identity.** The trust store keys on the nickname you see. Two people
   choosing the same nickname raise a false `!! KEY CHANGED` alarm — deliberately, because
   alarming wrongly is the safe direction to fail.

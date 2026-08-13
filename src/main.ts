@@ -1,5 +1,6 @@
 import { stdin, stdout } from "node:process";
 import * as readline from "node:readline/promises";
+import { nickProblem } from "../shared/protocol/text.ts";
 import type { SessionHandlers } from "./session.ts";
 
 export const DEFAULT_RELAY_URL = "ws://localhost:8787";
@@ -8,10 +9,15 @@ export const DEFAULT_RELAY_PORT = 8787;
 export const HELP = `termino — end-to-end encrypted terminal chat
 
 Usage:
-  termino [--channel <name>] [--nick <name>] [--relay <url>]
+  termino [--channel <name>] [--nick <name>] [--relay <url>] [--insecure]
       Client. Prompts for the channel password on stdin without echoing it,
       derives keys, connects, then mounts the TUI. --channel and --nick are
       prompted for on stdin if omitted. Default --relay is ${DEFAULT_RELAY_URL}.
+
+      A --relay with no scheme is read as wss://. Plain ws:// is refused for
+      every host but localhost, 127.0.0.1 and [::1]: nothing authenticates a
+      relay, so an unencrypted connection to a remote one can be dropped or
+      delayed by anyone on the path. --insecure permits it anyway.
 
   termino serve [--port <n>]
       Relay. Default port ${DEFAULT_RELAY_PORT}, WebSocket path /.
@@ -53,8 +59,8 @@ export function parseArgs(argv: string[]): Command {
 }
 
 function parseServeArgs(argv: string[]): ServeCommand {
-  const flags = readFlags(argv, ["--port"]);
-  const given = flags.get("--port");
+  const { values } = readFlags(argv, ["--port"]);
+  const given = values.get("--port");
   if (given === undefined) return { mode: "serve", port: DEFAULT_RELAY_PORT };
 
   const port = Number(given);
@@ -65,36 +71,104 @@ function parseServeArgs(argv: string[]): ServeCommand {
 }
 
 function parseClientArgs(argv: string[]): ClientCommand {
-  const flags = readFlags(argv, ["--channel", "--nick", "--relay"]);
+  const { values, switches } = readFlags(argv, ["--channel", "--nick", "--relay"], ["--insecure"]);
+
+  const nick = values.get("--nick");
+  if (nick !== undefined) {
+    // A nickname is drawn into the status bar and next to every line this
+    // client sends, so the rule that protects the reader from a peer's
+    // nickname has to protect them from their own too — a --nick can arrive
+    // from a launch script or a pasted command nobody read.
+    const problem = nickProblem(nick);
+    if (problem !== null) throw new UsageError(`--nick is not usable: ${problem}`);
+  }
 
   return {
     mode: "client",
-    channel: flags.get("--channel"),
-    nick: flags.get("--nick"),
-    relay: flags.get("--relay") ?? DEFAULT_RELAY_URL,
+    channel: values.get("--channel"),
+    nick,
+    relay: resolveRelayUrl(values.get("--relay") ?? DEFAULT_RELAY_URL, switches.has("--insecure")),
   };
 }
 
-/** Flags are always `--name value` pairs; anything else is a usage error. */
-function readFlags(argv: string[], allowed: readonly string[]): Map<string, string> {
-  const flags = new Map<string, string>();
+/** Loopback carries no network an attacker can sit on. `URL.hostname` keeps
+ * the brackets on an IPv6 literal, so `[::1]` is spelt that way here. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-  for (let index = 0; index < argv.length; index += 2) {
-    const token = argv[index];
-    const value = argv[index + 1];
-    if (token === undefined) break;
+const SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * The relay URL a client should dial, or a `UsageError` explaining why not.
+ *
+ * Message contents are encrypted whatever the transport, but nothing
+ * authenticates the relay, so plain `ws://` over a real network lets an
+ * attacker on the path drop or delay traffic silently. A mistyped scheme fails
+ * here rather than inside the renderer, where the only symptom would be a
+ * connection that never opens behind a full-screen interface.
+ */
+function resolveRelayUrl(given: string, insecure: boolean): string {
+  const withScheme = SCHEME_PATTERN.test(given) ? given : `wss://${given}`;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw new UsageError(`--relay is not a URL: ${given}`);
+  }
+
+  if (parsed.protocol === "wss:") return withScheme;
+
+  if (parsed.protocol !== "ws:")
+    throw new UsageError(`--relay must be ws:// or wss://, got ${parsed.protocol}// in: ${given}`);
+
+  if (insecure || LOOPBACK_HOSTS.has(parsed.hostname)) return withScheme;
+
+  throw new UsageError(
+    `--relay ${given} is unencrypted ws:// to ${parsed.hostname}, which nothing authenticates; ` +
+      `use wss://, or --insecure to accept that a network attacker can drop or delay your messages`,
+  );
+}
+
+interface Flags {
+  values: Map<string, string>;
+  switches: Set<string>;
+}
+
+/** Flags are `--name value` pairs, except for the named value-less switches;
+ * anything else is a usage error. */
+function readFlags(
+  argv: string[],
+  allowed: readonly string[],
+  switches: readonly string[] = [],
+): Flags {
+  const values = new Map<string, string>();
+  const seen = new Set<string>();
+  let index = 0;
+
+  while (index < argv.length) {
+    const token = argv[index]!;
 
     if (token === "--password" || token === "--pass")
       throw new UsageError("the channel password is never accepted as a flag; termino prompts for it");
+
+    if (switches.includes(token)) {
+      seen.add(token);
+      index += 1;
+      continue;
+    }
+
     if (!allowed.includes(token))
       throw new UsageError(`unknown option: ${token}\n\n${HELP}`);
+
+    const value = argv[index + 1];
     if (value === undefined || value.startsWith("-"))
       throw new UsageError(`option ${token} requires a value`);
 
-    flags.set(token, value);
+    values.set(token, value);
+    index += 2;
   }
 
-  return flags;
+  return { values, switches: seen };
 }
 
 async function promptLine(question: string): Promise<string> {
