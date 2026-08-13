@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { fingerprint } from "../../../shared/crypto/fingerprint.ts";
+import {
+  bytesFromWords,
+  fingerprint,
+  UnknownWordError,
+  words,
+} from "../../../shared/crypto/fingerprint.ts";
 import { WORDLIST } from "../../../shared/crypto/wordlist.ts";
 
 /** Recorded on first implementation. Pins both the byte-to-word mapping and
@@ -65,6 +70,36 @@ describe("WORDLIST", () => {
     }
 
     expect(tooClose).toEqual([]);
+  });
+});
+
+describe("the byte-to-word codec", () => {
+  test("renders one space-joined word per byte", () => {
+    // Recorded literally rather than looked up in the wordlist, so this can
+    // disagree with the list instead of restating it.
+    expect(words(Uint8Array.from([0, 1, 255]))).toBe("acorn agent yoga");
+  });
+
+  test("round-trips arbitrary bytes", () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+
+    expect(bytesFromWords(words(bytes))).toEqual(bytes);
+  });
+
+  test("decodes hyphen-separated words as well as spaces", () => {
+    expect(bytesFromWords("acorn-agent-yoga")).toEqual(Uint8Array.from([0, 1, 255]));
+  });
+
+  test("does not hash, so eight session words decode back to their eight bytes", () => {
+    const sas = Uint8Array.from([9, 8, 7, 6, 5, 4, 3, 2]);
+
+    expect(words(sas).split(" ")).toHaveLength(8);
+    expect(bytesFromWords(words(sas))).toEqual(sas);
+  });
+
+  test("throws naming the word that is not in the list", () => {
+    expect(() => bytesFromWords("acorn agent yoghurt")).toThrow(UnknownWordError);
+    expect(() => bytesFromWords("acorn agent yoghurt")).toThrow(/yoghurt/);
   });
 });
 
