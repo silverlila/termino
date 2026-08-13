@@ -1,4 +1,3 @@
-import { sha256 } from "@noble/hashes/sha2.js";
 import { WORDLIST } from "./wordlist.ts";
 
 /**
@@ -61,19 +60,4 @@ export function bytesFromWords(text: string): Uint8Array {
   });
 
   return bytes;
-}
-
-/** Eight words is 64 bits — enough that forging a colliding key to fool a
- * human comparison is not worth attempting, and still short enough to read
- * aloud over a phone call. */
-const FINGERPRINT_WORDS = 8;
-
-/**
- * @deprecated The v1 per-device fingerprint. It hashes its argument, which is
- * one-way and so useless to either v2 caller of this module; it survives only
- * until the trust store that reads it is deleted in the protocol v2
- * switchover.
- */
-export function fingerprint(publicKey: Uint8Array): string {
-  return words(sha256(publicKey).subarray(0, FINGERPRINT_WORDS));
 }

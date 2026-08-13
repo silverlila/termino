@@ -1,28 +1,42 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { bytesToHex } from "@noble/hashes/utils.js";
-import { deriveChannelKeys } from "../shared/crypto/derive.ts";
-import { loadOrCreateIdentity, type Identity } from "../shared/crypto/identity.ts";
-import { encodeFrame, subFrame } from "../shared/protocol/frame.ts";
-import { sealMessage } from "../shared/protocol/message.ts";
-import { removeTempDirs, startTestRelay, tempDir, wait, type TestRelay } from "./support/harness.ts";
+import { startHandshake } from "../shared/crypto/handshake.ts";
+import { deriveHandle, generatePsk } from "../shared/crypto/psk.ts";
+import { decodeFrame, encodeFrame, helloFrame, subFrame } from "../shared/protocol/frame.ts";
+import { startTestRelay, unlimitedClock, wait, type TestRelay } from "./support/harness.ts";
 import {
+  HANDSHAKE_TIMEOUT_MS,
+  SessionClosedError,
   startSession,
   type ConnectionState,
-  type DiscardedMessage,
   type IncomingMessage,
   type Session,
   type SessionHandlers,
-  type TrustEvent,
 } from "../src/session.ts";
 
-const CHANNEL_NAME = "stage-five";
-const PASSWORD = "correct horse battery staple";
-const WRONG_PASSWORD = "incorrect horse battery staple";
+/**
+ * The client core against a live relay, and against a network that is not
+ * behaving: a stand-in that swaps the keys travelling through it, one that
+ * drops a frame, one that reorders two.
+ *
+ * The relay under these tests runs on a clock that jumps a rate-limit window
+ * per frame. A v2 session spends three frames establishing itself, and what is
+ * under test here is the protocol rather than the limiter — `relay.test.ts`
+ * owns that.
+ */
 
-// Derived once: argon2id is deliberately expensive, and these are the only two
-// derivations the whole file needs.
-const CHANNEL = deriveChannelKeys(CHANNEL_NAME, PASSWORD);
-const WRONG_CHANNEL = deriveChannelKeys(CHANNEL_NAME, WRONG_PASSWORD);
+/** One secret for the whole file. Both ends of a conversation share it, and a
+ * session key still comes out different every time, because it comes from the
+ * exchange rather than from the secret. */
+const PSK = generatePsk();
+const OTHER_PSK = generatePsk();
+
+/** Short enough that the failure paths finish in milliseconds. Every test that
+ * expects a session to be established uses the default. */
+const IMPATIENT = 80;
+
+/** For the failures that have to let a real exchange happen first: still a
+ * fraction of a second, and still nothing like the twenty-second default. */
+const PATIENT = 500;
 
 let relay: TestRelay;
 let sessions: Session[] = [];
@@ -41,20 +55,20 @@ const settle = () => wait(150);
 
 interface Recorded {
   messages: IncomingMessage[];
-  presence: number[];
-  trust: TrustEvent[];
+  joined: string[];
+  gaps: { nick: string; count: number }[];
+  thirdParties: number;
   decryptErrors: Error[];
-  discarded: DiscardedMessage[];
   connection: ConnectionState[];
 }
 
 function recorder(): { handlers: SessionHandlers; got: Recorded } {
   const got: Recorded = {
     messages: [],
-    presence: [],
-    trust: [],
+    joined: [],
+    gaps: [],
+    thirdParties: 0,
     decryptErrors: [],
-    discarded: [],
     connection: [],
   };
 
@@ -62,22 +76,41 @@ function recorder(): { handlers: SessionHandlers; got: Recorded } {
     got,
     handlers: {
       onMessage: (message) => got.messages.push(message),
-      onPresence: (count) => got.presence.push(count),
-      onTrustEvent: (event) => got.trust.push(event),
+      onPeerJoined: (sasWords) => got.joined.push(sasWords),
+      onGap: (nick, count) => got.gaps.push({ nick, count }),
+      onThirdParty: () => (got.thirdParties += 1),
       onDecryptError: (error) => got.decryptErrors.push(error),
-      onDiscardedMessage: (discarded) => got.discarded.push(discarded),
       onConnectionChange: (state) => got.connection.push(state),
     },
   };
 }
 
+interface Peer {
+  session: Session;
+  got: Recorded;
+}
+
+async function joinAs(nick: string, url = relay.url, psk = PSK): Promise<Peer> {
+  const { handlers, got } = recorder();
+  const session = await startSession({ psk, nick, relayUrl: url, handlers });
+
+  sessions.push(session);
+  return { session, got };
+}
+
+/** Both ends of one conversation, established. */
+async function pair(url = relay.url): Promise<{ alice: Peer; bob: Peer }> {
+  const [alice, bob] = await Promise.all([joinAs("alice", url), joinAs("bob", url)]);
+  return { alice: alice!, bob: bob! };
+}
+
 /**
  * A connection that speaks the wire format directly, for the frames a session
- * would never produce: somebody else's bytes, sent again.
+ * would never produce.
  *
- * Closed from `afterEach` alongside the sessions rather than at the end of the
- * test that opened it — a failing assertion returns through neither, and one
- * socket left open outlives the whole file.
+ * Closed from `afterEach` rather than at the end of the test that opened it — a
+ * failing assertion returns through neither, and one socket left open outlives
+ * the whole file.
  */
 async function openRawSocket(): Promise<WebSocket> {
   const socket = new WebSocket(relay.url);
@@ -86,51 +119,124 @@ async function openRawSocket(): Promise<WebSocket> {
   return socket;
 }
 
-interface Peer {
-  session: Session;
-  identity: Identity;
-  got: Recorded;
-}
+/**
+ * Somebody who answers a hello with a hello of their own and then says nothing
+ * else — a wrong secret, or a relay pretending to be a peer.
+ *
+ * It waits to be greeted rather than greeting first: the relay keeps nothing,
+ * so a hello sent before the other side subscribed is gone, and this is the
+ * same re-send rule an honest client follows.
+ */
+async function openSilentPeer(handle: string): Promise<void> {
+  const socket = await openRawSocket();
+  let answered = false;
 
-async function joinAs(
-  nick: string,
-  keys = CHANNEL,
-  url = relay.url,
-): Promise<Peer> {
-  const identity = loadOrCreateIdentity(tempDir(`id-${nick}`));
-  const { handlers, got } = recorder();
+  socket.addEventListener("message", (event) => {
+    if (answered || decodeFrame(String(event.data)).t !== "hello") return;
 
-  const session = await startSession({
-    keys,
-    nick,
-    identity,
-    relayUrl: url,
-    handlers,
-    terminoDir: tempDir(`trust-${nick}`),
+    answered = true;
+    socket.send(encodeFrame(helloFrame(handle, startHandshake().publicKey)));
   });
 
-  sessions.push(session);
-  return { session, identity, got };
+  socket.send(encodeFrame(subFrame(handle)));
+  await settle();
+}
+
+interface Meddler {
+  url: string;
+  stop(): void;
+  /** Sends a frame to every client connected through this stand-in, as though
+   * the relay had delivered it. */
+  inject(raw: string): void;
+}
+
+interface Pipe {
+  upstream: WebSocket | null;
+  pending: string[];
+}
+
+/**
+ * A relay stand-in: every client dials this instead, and it opens its own
+ * connection to the real relay for each of them. What passes through can be
+ * changed, dropped, held back or invented, which is exactly what an attacker
+ * on the path can do.
+ */
+function startMeddler(
+  targetPort: number,
+  options: {
+    fromClient?(raw: string, forward: (raw: string) => void): void;
+    toClient?(raw: string, deliver: (raw: string) => void): void;
+  } = {},
+): Meddler {
+  const downstream = new Set<Bun.ServerWebSocket<Pipe>>();
+
+  const proxy = Bun.serve<Pipe, {}>({
+    port: 0,
+    fetch(request, server) {
+      if (server.upgrade(request, { data: { upstream: null, pending: [] } })) return undefined;
+      return new Response("websocket only", { status: 426 });
+    },
+    websocket: {
+      open(ws) {
+        downstream.add(ws);
+        const upstream = new WebSocket(`ws://localhost:${targetPort}/`);
+
+        upstream.addEventListener("open", () => {
+          for (const text of ws.data.pending) upstream.send(text);
+          ws.data.pending = [];
+        });
+        upstream.addEventListener("message", (event) => {
+          const raw = String(event.data);
+          const deliver = (text: string) => ws.send(text);
+
+          if (options.toClient === undefined) deliver(raw);
+          else options.toClient(raw, deliver);
+        });
+
+        ws.data.upstream = upstream;
+      },
+      message(ws, raw) {
+        const forward = (text: string) => {
+          const upstream = ws.data.upstream;
+          if (upstream !== null && upstream.readyState === WebSocket.OPEN) upstream.send(text);
+          else ws.data.pending.push(text);
+        };
+
+        const text = String(raw);
+        if (options.fromClient === undefined) forward(text);
+        else options.fromClient(text, forward);
+      },
+      close(ws) {
+        downstream.delete(ws);
+        ws.data.upstream?.close();
+      },
+    },
+  });
+
+  return {
+    url: `ws://localhost:${proxy.port}/`,
+    inject: (raw) => {
+      for (const ws of downstream) ws.send(raw);
+    },
+    stop: () => proxy.stop(true),
+  };
 }
 
 beforeEach(() => {
   sessions = [];
   rawSockets = [];
-  relay = startTestRelay();
+  relay = startTestRelay({ now: unlimitedClock() });
 });
 
 afterEach(() => {
   for (const session of sessions) session.close();
   for (const socket of rawSockets) socket.close();
   relay.server.stop(true);
-  removeTempDirs();
 });
 
-describe("two people in a channel", () => {
-  it("delivers a message decrypted and signature-verified", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
+describe("two people who share an invite", () => {
+  it("delivers a message with its nickname and body intact", async () => {
+    const { alice, bob } = await pair();
 
     await alice.session.send("shipping it now");
     await until(() => bob.got.messages.length === 1);
@@ -138,24 +244,47 @@ describe("two people in a channel", () => {
     const [received] = bob.got.messages;
     expect(received?.body).toBe("shipping it now");
     expect(received?.nick).toBe("alice");
-    // openMessage throws unless the signature verifies, so arrival proves it;
-    // this pins down *whose* key it verified against.
-    expect(received?.from).toBe(alice.identity.publicKeyHex);
+    // Nothing else could have written it: it opened under bob's receiving
+    // chain, which only alice holds the other end of.
+    expect(bob.got.messages).toHaveLength(1);
   });
 
-  it("tells the first arrival that a second has joined", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
+  it("delivers in both directions", async () => {
+    const { alice, bob } = await pair();
 
-    await until(() => bob.got.presence.length > 0);
-    expect(bob.got.presence[0]).toBe(2);
-    await until(() => alice.got.presence.includes(2));
+    await bob.session.send("on my way");
+    await until(() => alice.got.messages.length === 1);
+
+    expect(alice.got.messages[0]?.body).toBe("on my way");
+    expect(alice.got.messages[0]?.nick).toBe("bob");
+  });
+
+  it("lands both sides on the same session words, and different ones next time", async () => {
+    const { alice, bob } = await pair();
+
+    expect(alice.session.sasWords).toBe(bob.session.sasWords);
+    expect(alice.session.sasWords.split(" ")).toHaveLength(8);
+
+    // The same two people, the same secret, a second conversation. The words
+    // come from the exchange rather than from the secret, so there is nothing
+    // to memorise and nothing worth writing down.
+    alice.session.close();
+    bob.session.close();
+    await settle();
+
+    const again = await pair();
+    expect(again.alice.session.sasWords).not.toBe(alice.session.sasWords);
+  });
+
+  it("derives the same handle from the secret alone", async () => {
+    const { alice, bob } = await pair();
+
+    expect(alice.session.handle).toBe(deriveHandle(PSK));
+    expect(bob.session.handle).toBe(alice.session.handle);
   });
 
   it("does not deliver a sender their own message back", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
+    const { alice, bob } = await pair();
 
     const sent = await alice.session.send("shipping it now");
     await until(() => bob.got.messages.length === 1);
@@ -164,13 +293,10 @@ describe("two people in a channel", () => {
     expect(alice.got.messages).toHaveLength(0);
     // send() hands the message back so the sender can display its own traffic.
     expect(sent.body).toBe("shipping it now");
-    expect(sent.from).toBe(alice.identity.publicKeyHex);
   });
 
   it("keeps messages in the order they were sent", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
+    const { alice, bob } = await pair();
 
     for (const body of ["first", "second", "third"]) await alice.session.send(body);
     await until(() => bob.got.messages.length === 3);
@@ -182,319 +308,417 @@ describe("two people in a channel", () => {
     ]);
   });
 
-  it("reports the connection lifecycle", async () => {
-    const alice = await joinAs("alice");
+  it("delivers three sends that did not wait for each other", async () => {
+    const { alice, bob } = await pair();
+
+    // Three keypresses in a row, which is the path the interface actually
+    // uses: `App.tsx` starts the next send without waiting for the last.
+    //
+    // This does *not* prove the send queue in `session.ts`. Counters are taken
+    // before the first await, and Bun's WebCrypto resolves concurrent seals in
+    // call order, so these three arrive in order with the queue deleted too.
+    // What it does prove is that unawaited sends all arrive, none is lost, and
+    // none reads as a gap.
+    await Promise.all([
+      alice.session.send("first"),
+      alice.session.send("second"),
+      alice.session.send("third"),
+    ]);
+    await until(() => bob.got.messages.length === 3);
+    await settle();
+
+    expect(bob.got.messages.map((message) => message.body)).toEqual([
+      "first",
+      "second",
+      "third",
+    ]);
+    expect(bob.got.gaps).toEqual([]);
+  });
+
+  it("reports the connection lifecycle, and opens only once a peer has confirmed", async () => {
+    const { alice } = await pair();
     expect(alice.got.connection).toEqual(["connecting", "open"]);
+    expect(alice.got.joined).toEqual([alice.session.sasWords]);
 
     alice.session.close();
     await until(() => alice.got.connection.includes("closed"));
   });
-});
 
-describe("someone with the wrong password", () => {
-  it("never sees a message, even after a confirmed exchange between the others", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    const eve = await joinAs("eve", WRONG_CHANNEL);
-    await until(() => alice.got.presence.includes(2));
-
-    await alice.session.send("shipping it now");
-    // Assert absence only after the exchange is known to have completed.
-    await until(() => bob.got.messages.length === 1);
-    await settle();
-
-    expect(eve.got.messages).toHaveLength(0);
-    expect(eve.got.decryptErrors).toHaveLength(0);
-    // The wrong password produces a different handle, so eve is not even in
-    // the same channel — the relay never sends her anything to fail on.
-    expect(eve.session.handle).not.toBe(alice.session.handle);
-  });
-});
-
-describe("someone on the right handle with the wrong key", () => {
-  it("receives the frame and fails to open it", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    // Unreachable through a password — handle and message key always derive
-    // together — so it is constructed directly.
-    const mallory = await joinAs("mallory", {
-      handle: CHANNEL.handle,
-      msgKey: new Uint8Array(32).fill(42),
-    });
-    await until(() => alice.got.presence.includes(3));
-
-    await alice.session.send("shipping it now");
-    await until(() => bob.got.messages.length === 1);
-    await until(() => mallory.got.decryptErrors.length === 1);
-    await settle();
-
-    expect(mallory.got.messages).toHaveLength(0);
-    expect(mallory.got.decryptErrors).toHaveLength(1);
-  });
-});
-
-describe("impersonation inside a channel", () => {
-  it("rejects a message whose signature does not match the key it claims", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
-
-    // Mallory holds the channel password, so she can encrypt. She cannot sign
-    // as alice. This is the whole reason device keys exist.
-    const mallory = loadOrCreateIdentity(tempDir("id-mallory"));
-    const forged = await sealMessage({
-      msgKey: CHANNEL.msgKey,
-      handle: CHANNEL.handle,
-      payload: {
-        from: alice.identity.publicKeyHex,
-        nick: "alice",
-        body: "transfer the funds",
-        ts: 1786531200000,
-      },
-      secretKey: mallory.secretKey,
-    });
-
-    const socket = new WebSocket(relay.url);
-    await new Promise<void>((resolve) => socket.addEventListener("open", () => resolve()));
-    socket.send(encodeFrame(subFrame(CHANNEL.handle)));
-    socket.send(encodeFrame(forged));
-
-    await until(() => bob.got.decryptErrors.length === 1);
-    await settle();
-
-    expect(bob.got.messages).toHaveLength(0);
-    socket.close();
-  });
-});
-
-describe("a message played back onto the channel", () => {
-  it("is discarded rather than shown a second time", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
-
-    // Eve holds no key and never learns one. All she does is subscribe to a
-    // handle that travels in the clear, keep the bytes she is forwarded, and
-    // send them again — which needs no password at all.
-    const eve = await openRawSocket();
-    const captured: string[] = [];
-    eve.addEventListener("message", (event) => {
-      const raw = String(event.data);
-      if (JSON.parse(raw).t === "msg") captured.push(raw);
-    });
-    eve.send(encodeFrame(subFrame(CHANNEL.handle)));
-    await until(() => alice.got.presence.includes(3));
-
-    await alice.session.send("transfer the funds");
-    await until(() => bob.got.messages.length === 1 && captured.length === 1);
-
-    eve.send(captured[0]!);
-    await settle();
-
-    expect(bob.got.messages).toHaveLength(1);
-    expect(bob.got.discarded).toEqual([{ nick: "alice", reason: "replayed" }]);
-  });
-
-  it("is discarded when it was recorded long enough ago to predate this session", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
-
-    // Genuinely alice's, genuinely signed, genuinely for this channel — and a
-    // day old. Nothing this session has seen before, so a set of signatures
-    // this process happens to remember cannot be what refuses it.
-    const yesterday = await sealMessage({
-      msgKey: CHANNEL.msgKey,
-      handle: CHANNEL.handle,
-      payload: {
-        from: alice.identity.publicKeyHex,
-        nick: "alice",
-        body: "transfer the funds",
-        ts: Date.now() - 24 * 60 * 60 * 1000,
-      },
-      secretKey: alice.identity.secretKey,
-    });
-
-    const eve = await openRawSocket();
-    eve.send(encodeFrame(subFrame(CHANNEL.handle)));
-    eve.send(encodeFrame(yesterday));
-    await until(() => bob.got.discarded.length === 1);
-    await settle();
-
-    expect(bob.got.messages).toHaveLength(0);
-    expect(bob.got.discarded).toEqual([{ nick: "alice", reason: "stale" }]);
-    // A message that is never shown never teaches the trust store anything:
-    // otherwise a recording of somebody's old key would raise KEY CHANGED
-    // against the key they hold today.
-    expect(bob.got.trust).toHaveLength(0);
-  });
-
-  it("does not stop somebody sending the same words twice", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
-
-    // Two messages, identical but for the timestamp each was sent at — which
-    // is inside what alice signs, so they are two different signatures.
-    await alice.session.send("ok");
-    await until(() => bob.got.messages.length === 1);
-    await wait(5);
-    await alice.session.send("ok");
-    await until(() => bob.got.messages.length === 2);
-
-    expect(bob.got.messages.map((message) => message.body)).toEqual(["ok", "ok"]);
-    expect(bob.got.discarded).toEqual([]);
-  });
-});
-
-describe("trust on first use across a live channel", () => {
-  it("reports a first sighting as NEW and the next as KNOWN", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
-
-    await alice.session.send("first");
-    await until(() => bob.got.messages.length === 1);
-    await alice.session.send("second");
-    await until(() => bob.got.messages.length === 2);
-
-    expect(bob.got.messages.map((message) => message.trust)).toEqual(["NEW", "KNOWN"]);
-    expect(bob.got.trust).toEqual([
-      {
-        nick: "alice",
-        pubkey: alice.identity.publicKeyHex,
-        state: "NEW",
-        // The event carries the store as it now stands, so a view rendering
-        // trust markers never has to go and fetch a copy of its own.
-        records: {
-          alice: {
-            pubkey: alice.identity.publicKeyHex,
-            verified: false,
-            firstSeen: expect.any(Number),
-          },
-        },
-      },
-    ]);
-  });
-
-  it("persists what it saw, so the store outlives the session", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
+  it("timestamps a message by when it arrived, not by anything the sender said", async () => {
+    const { alice, bob } = await pair();
+    const before = Date.now();
 
     await alice.session.send("shipping it now");
     await until(() => bob.got.messages.length === 1);
 
-    expect(bob.session.trustRecords().alice?.pubkey).toBe(alice.identity.publicKeyHex);
-    expect(bob.session.trustRecords().alice?.verified).toBe(false);
-  });
-
-  it("raises CHANGED when a nickname arrives with a second key", async () => {
-    const alice = await joinAs("alice");
-    const bob = await joinAs("bob");
-    await until(() => alice.got.presence.includes(2));
-
-    await alice.session.send("it is me");
-    await until(() => bob.got.messages.length === 1);
-
-    // A different device claiming the same nickname.
-    const impostor = await joinAs("alice", CHANNEL);
-    await impostor.session.send("no, it is me");
-    await until(() => bob.got.messages.length === 2);
-
-    expect(bob.got.messages[1]?.trust).toBe("CHANGED");
-    expect(bob.got.trust.map((event) => event.state)).toEqual(["NEW", "CHANGED"]);
+    const ts = bob.got.messages[0]?.ts ?? 0;
+    expect(ts).toBeGreaterThanOrEqual(before);
+    expect(ts).toBeLessThanOrEqual(Date.now());
   });
 });
 
-describe("what the relay actually receives", () => {
-  interface Wiretap {
-    url: string;
-    received: string[];
-    stop(): void;
-  }
+describe("somebody with a different invite", () => {
+  it("is not even in the same channel", async () => {
+    const { alice } = await pair();
+    const stranger = deriveHandle(OTHER_PSK);
 
-  interface Pipe {
-    upstream: WebSocket | null;
-    pending: string[];
-  }
+    expect(stranger).not.toBe(alice.session.handle);
+  });
+});
 
-  /** Sits between the client and the relay and records every byte travelling
-   * towards the relay, so the assertions below are about what was really sent
-   * rather than about what the client meant to send. */
-  function startWiretap(targetPort: number): Wiretap {
-    const received: string[] = [];
+describe("a man in the middle", () => {
+  it("cannot make either side accept a session", async () => {
+    // It holds no secret. All it does is swap the ephemeral public key in
+    // every hello for one of its own — which is the whole of the attack, and
+    // is what an unauthenticated Diffie-Hellman exchange has no answer to.
+    const theirs = startHandshake();
 
-    const proxy = Bun.serve<Pipe, {}>({
-      port: 0,
-      fetch(request, server) {
-        if (server.upgrade(request, { data: { upstream: null, pending: [] } })) return undefined;
-        return new Response("websocket only", { status: 426 });
-      },
-      websocket: {
-        open(ws) {
-          const upstream = new WebSocket(`ws://localhost:${targetPort}/`);
-          upstream.addEventListener("open", () => {
-            for (const text of ws.data.pending) upstream.send(text);
-            ws.data.pending = [];
-          });
-          upstream.addEventListener("message", (event) => ws.send(String(event.data)));
-          ws.data.upstream = upstream;
-        },
-        message(ws, raw) {
-          const text = String(raw);
-          received.push(text);
+    const meddler = startMeddler(relay.port, {
+      fromClient(raw, forward) {
+        const frame = decodeFrame(raw);
+        if (frame.t !== "hello") return forward(raw);
 
-          const upstream = ws.data.upstream;
-          if (upstream !== null && upstream.readyState === WebSocket.OPEN) upstream.send(text);
-          else ws.data.pending.push(text);
-        },
-        close(ws) {
-          ws.data.upstream?.close();
-        },
+        forward(encodeFrame(helloFrame(frame.h, theirs.publicKey)));
       },
     });
-
-    return {
-      url: `ws://localhost:${proxy.port}/`,
-      received,
-      stop: () => proxy.stop(true),
-    };
-  }
-
-  it("sees only a handle and an opaque blob — never the password or a private key", async () => {
-    const wiretap = startWiretap(relay.port);
 
     try {
-      const alice = await joinAs("alice", CHANNEL, wiretap.url);
-      const bob = await joinAs("bob", CHANNEL, wiretap.url);
-      await until(() => alice.got.presence.includes(2));
+      // Both are awaited together rather than one after the other: a rejection
+      // nobody is waiting on yet is an unhandled one, which fails the run
+      // somewhere other than here.
+      const refusals = await Promise.all([
+        rejection(startSession({ psk: PSK, nick: "alice", relayUrl: meddler.url, handshakeTimeoutMs: PATIENT })),
+        rejection(startSession({ psk: PSK, nick: "bob", relayUrl: meddler.url, handshakeTimeoutMs: PATIENT })),
+      ]);
 
-      await alice.session.send("shipping it now");
+      // Both confirms fail to open, so neither session is ever established and
+      // the failure names what it might be rather than reading as a hiccup.
+      for (const refusal of refusals) {
+        expect(refusal.message).toMatch(/somebody is in the middle/);
+      }
+    } finally {
+      meddler.stop();
+    }
+  });
+});
+
+describe("a hello that was not sent by the peer", () => {
+  it("is refused when it is this client's own, reflected back", async () => {
+    const meddler = startMeddler(relay.port, {
+      fromClient(raw, forward) {
+        const frame = decodeFrame(raw);
+        forward(raw);
+
+        // Straight back down the connection it came from, which an honest
+        // relay never does.
+        if (frame.t === "hello") meddler.inject(raw);
+      },
+    });
+
+    try {
+      const attempt = startSession({
+        psk: PSK,
+        nick: "alice",
+        relayUrl: meddler.url,
+        handshakeTimeoutMs: IMPATIENT,
+      });
+
+      await expect(attempt).rejects.toThrow(/reflected back/);
+    } finally {
+      meddler.stop();
+    }
+  });
+});
+
+describe("a third party", () => {
+  it("is ignored and said out loud when it hellos into an established session", async () => {
+    const meddler = startMeddler(relay.port);
+
+    try {
+      const { handlers, got } = recorder();
+
+      // Started together: neither side's `startSession` resolves until the
+      // other has answered, so waiting for the first one before opening the
+      // second would wait for ever.
+      const [alice, bob] = await Promise.all([
+        startSession({ psk: PSK, nick: "alice", relayUrl: meddler.url, handlers }),
+        joinAs("bob", meddler.url),
+      ]);
+      sessions.push(alice);
+
+      const intruder = startHandshake();
+      meddler.inject(encodeFrame(helloFrame(alice.handle, intruder.publicKey)));
+      await until(() => got.thirdParties === 1);
+
+      // Ignored, not acted on: the session alice already has still works.
+      await bob.session.send("still here");
+      await until(() => got.messages.length === 1);
+      expect(got.messages[0]?.body).toBe("still here");
+      expect(alice.sasWords).toBe(bob.session.sasWords);
+    } finally {
+      meddler.stop();
+    }
+  });
+
+  it("says nothing when the peer merely repeats the hello it already sent", async () => {
+    const { alice } = await pair();
+    await settle();
+
+    // Both sides answer a hello with one of their own, so a duplicate is the
+    // ordinary case rather than an intrusion.
+    expect(alice.got.thirdParties).toBe(0);
+  });
+
+  it("cannot get a third connection onto the handle at all", async () => {
+    await pair();
+
+    const attempt = startSession({
+      psk: PSK,
+      nick: "eve",
+      relayUrl: relay.url,
+      handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
+    });
+
+    await expect(attempt).rejects.toThrow(/two participants/);
+  });
+});
+
+/**
+ * Only alice sends text here, and a confirm is always counter 0, so a counter
+ * above 0 belongs to alice alone. That makes "drop the message numbered 2" a
+ * choice of one exact frame rather than of whichever frame happened to be
+ * third through the pipe.
+ */
+function droppingMeddler(counter: number): Meddler {
+  return startMeddler(relay.port, {
+    toClient(raw, deliver) {
+      const frame = decodeFrame(raw);
+      if (frame.t === "msg" && frame.i === counter) return;
+
+      deliver(raw);
+    },
+  });
+}
+
+describe("a gap in the numbering", () => {
+  it("is reported once the message after it has arrived", async () => {
+    const meddler = droppingMeddler(2);
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      await alice.session.send("one");
       await until(() => bob.got.messages.length === 1);
+      await alice.session.send("two");
+      await alice.session.send("three");
+      await until(() => bob.got.messages.length === 2);
       await settle();
 
-      expect(wiretap.received.length).toBeGreaterThan(0);
+      // Nothing yet. The message numbered 2 is missing, but the one that
+      // stepped over it is the only evidence so far, and a message that
+      // overtakes another is not a message that was lost.
+      expect(bob.got.gaps).toEqual([]);
 
-      for (const raw of wiretap.received) {
-        const frame = JSON.parse(raw);
+      await alice.session.send("four");
+      await until(() => bob.got.messages.length === 3);
+      await until(() => bob.got.gaps.length === 1);
 
-        // The outer frame carries these keys and nothing else. In particular
-        // there is no `sig`, no `nick`, and no public key.
-        const expectedKeys = frame.t === "msg" ? ["c", "h", "n", "t", "v"] : ["h", "t", "v"];
-        expect(Object.keys(frame).sort()).toEqual(expectedKeys);
+      expect(bob.got.gaps).toEqual([{ nick: "alice", count: 1 }]);
+      expect(bob.got.messages.map((message) => message.body)).toEqual(["one", "three", "four"]);
+    } finally {
+      meddler.stop();
+    }
+  });
 
-        // Requirements 2 and 6: neither of these is ever transmitted.
-        expect(raw).not.toContain(PASSWORD);
-        expect(raw).not.toContain(bytesToHex(alice.identity.secretKey));
-        expect(raw).not.toContain(bytesToHex(bob.identity.secretKey));
-        expect(raw).not.toContain("shipping it now");
+  it("is reported once and not again on every message that follows", async () => {
+    const meddler = droppingMeddler(2);
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      for (const body of ["one", "two", "three", "four", "five"]) {
+        await alice.session.send(body);
+      }
+      await until(() => bob.got.messages.length === 4);
+      await settle();
+
+      expect(bob.got.gaps).toEqual([{ nick: "alice", count: 1 }]);
+    } finally {
+      meddler.stop();
+    }
+  });
+
+  it("says nothing when the missing message arrives out of order", async () => {
+    // Holds message 2 back and lets 3 overtake it, which is reordering rather
+    // than loss — and the cached key is what makes it openable when it lands.
+    let held: string | null = null;
+
+    const meddler = startMeddler(relay.port, {
+      toClient(raw, deliver) {
+        const frame = decodeFrame(raw);
+
+        if (frame.t === "msg" && frame.i === 2) {
+          held = raw;
+          return;
+        }
+
+        deliver(raw);
+
+        if (held !== null) {
+          deliver(held);
+          held = null;
+        }
+      },
+    });
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      await alice.session.send("one");
+      await until(() => bob.got.messages.length === 1);
+      await alice.session.send("two");
+      await alice.session.send("three");
+      await until(() => bob.got.messages.length === 3);
+      await settle();
+
+      expect(bob.got.gaps).toEqual([]);
+      expect(bob.got.messages.map((message) => message.body)).toEqual(["one", "three", "two"]);
+    } finally {
+      meddler.stop();
+    }
+  });
+});
+
+describe("a handshake timeout", () => {
+  it("defaults to twenty seconds", () => {
+    // Long enough for somebody to be slow opening a second terminal, and short
+    // enough that a wrong invite does not read as a hang.
+    expect(HANDSHAKE_TIMEOUT_MS).toBe(20_000);
+  });
+
+  it("says nobody is here when no hello ever arrives", async () => {
+    const attempt = startSession({
+      psk: PSK,
+      nick: "alice",
+      relayUrl: relay.url,
+      handshakeTimeoutMs: IMPATIENT,
+    });
+
+    await expect(attempt).rejects.toThrow(/nobody else is here yet/);
+  });
+
+  it("says somebody may be in the middle when a hello arrives and nothing opens", async () => {
+    await openSilentPeer(deriveHandle(PSK));
+
+    const attempt = startSession({
+      psk: PSK,
+      nick: "alice",
+      relayUrl: relay.url,
+      handshakeTimeoutMs: PATIENT,
+    });
+
+    await expect(attempt).rejects.toThrow(/somebody is in the middle/);
+  });
+
+  it("tells the two failures apart", async () => {
+    await openSilentPeer(deriveHandle(OTHER_PSK));
+
+    const answered = await rejection(
+      startSession({
+        psk: OTHER_PSK,
+        nick: "alice",
+        relayUrl: relay.url,
+        handshakeTimeoutMs: PATIENT,
+      }),
+    );
+
+    const alone = await rejection(
+      startSession({
+        psk: PSK,
+        nick: "alice",
+        relayUrl: relay.url,
+        handshakeTimeoutMs: IMPATIENT,
+      }),
+    );
+
+    // Two different events, said two different ways: one is a conversation
+    // nobody has joined yet, the other is an alarm.
+    expect(answered.message).not.toBe(alone.message);
+  });
+});
+
+/** The error a promise settled with, for a comparison that needs both. */
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    return error as Error;
+  }
+
+  throw new Error("expected the session to be refused");
+}
+
+describe("a session being torn down", () => {
+  it("wipes both chain keys and every cached message key before closing the socket", async () => {
+    // A dropped frame leaves a key cached for a message that may still turn
+    // up, which is the only way the skip cache has anything in it at all.
+    const meddler = droppingMeddler(2);
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      await alice.session.send("one");
+      await until(() => bob.got.messages.length === 1);
+      await alice.session.send("two");
+      await alice.session.send("three");
+      await until(() => bob.got.messages.length === 2);
+
+      const wiped = bob.session.close();
+
+      // The sending chain, the receiving chain, and the key and nonce still
+      // held for the message numbered 2. Nothing was handed in from out here:
+      // these are the buffers the session was using a moment ago.
+      expect(wiped).toHaveLength(4);
+      for (const buffer of wiped) {
+        expect(buffer.length).toBeGreaterThan(0);
+        expect(Array.from(buffer).every((byte) => byte === 0)).toBe(true);
       }
 
-      // And the message really did travel: a msg frame was among them.
-      expect(wiretap.received.some((raw) => JSON.parse(raw).t === "msg")).toBe(true);
+      // The socket goes down after the wipe, not before: this is the far end
+      // of the same close(), so it cannot report success for a teardown that
+      // stopped half way.
+      await until(() => bob.got.connection.includes("closed"));
     } finally {
-      wiretap.stop();
+      meddler.stop();
     }
+  });
+
+  it("has nothing left to send afterwards", async () => {
+    const { alice } = await pair();
+    alice.session.close();
+
+    await expect(alice.session.send("hello?")).rejects.toBeInstanceOf(SessionClosedError);
+  });
+
+  it("refuses a message that was still being sealed when it closed", async () => {
+    const { alice, bob } = await pair();
+
+    // Somebody typing a line and quitting in the same breath. The interface
+    // does not wait for a send before tearing the session down, so this
+    // interleaving is a keystroke away rather than a curiosity.
+    const pending = alice.session.send("did this leave the machine?");
+
+    // One microtask, which is what puts the close *inside* the send: the queued
+    // send has started and is suspended on sealing, and has not reached the
+    // socket.
+    await Promise.resolve();
+    alice.session.close();
+
+    // A closed socket neither delivers nor complains, so a send that resolved
+    // here would put the line in the sender's own transcript as though it had
+    // gone out. Nothing arrived at the other end, and the sender is told.
+    await expect(pending).rejects.toBeInstanceOf(SessionClosedError);
+    await settle();
+    expect(bob.got.messages).toHaveLength(0);
   });
 });

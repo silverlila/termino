@@ -9,7 +9,7 @@
  */
 
 /** Bumped only for a breaking change. Unknown versions are rejected, not ignored. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** A frame larger than this is dropped before it is parsed. The plaintext is
  * padded to at most 4096 bytes, which base64s to roughly 5.5 KB once the tag
@@ -18,14 +18,24 @@ export const PROTOCOL_VERSION = 1;
  * imported: this module may not depend on `shared/crypto/`. */
 export const MAX_FRAME_BYTES = 8192;
 
-/** Duplicated from `crypto/seal.ts` rather than imported, because this module
- * may not depend on crypto. The two must agree. */
-const NONCE_BYTES = 12;
+/** An X25519 public key, as it rides in a `hello`. Written out rather than
+ * imported for the same reason: the relay's dependency cone stops here. The
+ * handshake checks the length again before it uses the key. */
+const PUBLIC_KEY_BYTES = 32;
+
+/** Message counters are 32-bit unsigned. A counter beyond this is a malformed
+ * frame rather than a very long conversation. */
+const MAX_COUNTER = 0xffffffff;
 
 const HANDLE_PATTERN = /^[0-9a-f]{32}$/;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
 
-export const ERROR_CODES = ["rate_limited", "bad_frame", "not_subscribed"] as const;
+export const ERROR_CODES = [
+  "rate_limited",
+  "bad_frame",
+  "not_subscribed",
+  "channel_full",
+] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** Client → relay, the first frame on a connection. */
@@ -35,24 +45,32 @@ export interface SubFrame {
   h: string;
 }
 
+/**
+ * Client → relay → the other subscriber. The ephemeral public key travels in
+ * the clear because there is no key yet; an eavesdropper without the
+ * pre-shared key learns two public keys and can do nothing with them.
+ */
+export interface HelloFrame {
+  v: typeof PROTOCOL_VERSION;
+  t: "hello";
+  /** Handle: 32 lowercase hex characters. */
+  h: string;
+  /** Base64 32-byte X25519 public key. */
+  k: string;
+}
+
 /** Client → relay → every other subscriber to the same handle. */
 export interface MsgFrame {
   v: typeof PROTOCOL_VERSION;
   t: "msg";
-  /** Handle: 32 lowercase hex characters. */
   h: string;
-  /** Base64 12-byte nonce. */
-  n: string;
-  /** Base64 AES-GCM ciphertext. The relay forwards this byte for byte. */
+  /** The sender's counter on its own chain. In the clear: the relay already
+   * sees how many messages moved and when, and the receiver needs it to derive
+   * the right key and to notice a gap. */
+  i: number;
+  /** Base64 AES-GCM ciphertext. The relay forwards this byte for byte. There
+   * is no nonce field — the nonce is derived from the chain. */
   c: string;
-}
-
-/** Relay → client. `n` counts the connections subscribed to the handle,
- * including the recipient. */
-export interface PresenceFrame {
-  v: typeof PROTOCOL_VERSION;
-  t: "presence";
-  n: number;
 }
 
 /** Relay → one client. Never broadcast. */
@@ -62,11 +80,11 @@ export interface ErrFrame {
   code: ErrorCode;
 }
 
-/** The two frames a client may send. */
-export type ClientFrame = SubFrame | MsgFrame;
-/** The two frames the relay originates. Neither carries anything derived from
- * ciphertext. */
-export type RelayFrame = PresenceFrame | ErrFrame;
+/** The three frames a client may send. */
+export type ClientFrame = SubFrame | HelloFrame | MsgFrame;
+/** The only frame the relay originates. It carries nothing derived from
+ * ciphertext, because the relay has nothing to derive it from. */
+export type RelayFrame = ErrFrame;
 export type Frame = ClientFrame | RelayFrame;
 
 /**
@@ -86,9 +104,9 @@ export function toBase64(bytes: Uint8Array): string {
 
 /**
  * `Buffer.from(text, "base64")` silently discards characters outside the
- * alphabet, so a corrupt nonce would decode to a plausible-looking short one.
- * The shape is checked first so corruption fails here instead of surfacing as
- * a decryption error later.
+ * alphabet, so a corrupt public key would decode to a plausible-looking short
+ * one. The shape is checked first so corruption fails here instead of
+ * surfacing as a handshake or decryption error later.
  */
 export function fromBase64(text: string): Uint8Array {
   if (!BASE64_PATTERN.test(text)) throw new FrameError("not valid base64");
@@ -99,18 +117,12 @@ export function subFrame(handle: string): SubFrame {
   return { v: PROTOCOL_VERSION, t: "sub", h: handle };
 }
 
-export function msgFrame(handle: string, nonce: Uint8Array, ciphertext: Uint8Array): MsgFrame {
-  return {
-    v: PROTOCOL_VERSION,
-    t: "msg",
-    h: handle,
-    n: toBase64(nonce),
-    c: toBase64(ciphertext),
-  };
+export function helloFrame(handle: string, publicKey: Uint8Array): HelloFrame {
+  return { v: PROTOCOL_VERSION, t: "hello", h: handle, k: toBase64(publicKey) };
 }
 
-export function presenceFrame(subscriberCount: number): PresenceFrame {
-  return { v: PROTOCOL_VERSION, t: "presence", n: subscriberCount };
+export function msgFrame(handle: string, counter: number, ciphertext: Uint8Array): MsgFrame {
+  return { v: PROTOCOL_VERSION, t: "msg", h: handle, i: counter, c: toBase64(ciphertext) };
 }
 
 export function errFrame(code: ErrorCode): ErrFrame {
@@ -121,10 +133,10 @@ export function encodeFrame(frame: Frame): string {
   return JSON.stringify(frame);
 }
 
-/** True for the two frames a relay accepts. The relay drops `presence` and
- * `err` arriving from a client: it originates those, it never receives them. */
+/** True for the frames a relay accepts. The relay drops `err` arriving from a
+ * client: it originates that one, it never receives it. */
 export function isClientFrame(frame: Frame): frame is ClientFrame {
-  return frame.t === "sub" || frame.t === "msg";
+  return frame.t === "sub" || frame.t === "hello" || frame.t === "msg";
 }
 
 /**
@@ -160,16 +172,21 @@ export function decodeFrame(raw: string | Uint8Array): Frame {
   switch (fields.t) {
     case "sub":
       return subFrame(readHandle(fields.h));
+    case "hello":
+      return {
+        v: PROTOCOL_VERSION,
+        t: "hello",
+        h: readHandle(fields.h),
+        k: readPublicKey(fields.k),
+      };
     case "msg":
       return {
         v: PROTOCOL_VERSION,
         t: "msg",
         h: readHandle(fields.h),
-        n: readNonce(fields.n),
+        i: readCounter(fields.i),
         c: readCiphertext(fields.c),
       };
-    case "presence":
-      return presenceFrame(readSubscriberCount(fields.n));
     case "err":
       return errFrame(readErrorCode(fields.code));
     default:
@@ -185,10 +202,17 @@ function readHandle(value: unknown): string {
   return value;
 }
 
-function readNonce(value: unknown): string {
-  if (typeof value !== "string") throw new FrameError("nonce is not a string");
-  if (fromBase64(value).length !== NONCE_BYTES) {
-    throw new FrameError(`nonce is not ${NONCE_BYTES} bytes`);
+function readPublicKey(value: unknown): string {
+  if (typeof value !== "string") throw new FrameError("public key is not a string");
+  if (fromBase64(value).length !== PUBLIC_KEY_BYTES) {
+    throw new FrameError(`public key is not ${PUBLIC_KEY_BYTES} bytes`);
+  }
+  return value;
+}
+
+function readCounter(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > MAX_COUNTER) {
+    throw new FrameError(`counter is not an integer from 0 to ${MAX_COUNTER}`);
   }
   return value;
 }
@@ -196,13 +220,6 @@ function readNonce(value: unknown): string {
 function readCiphertext(value: unknown): string {
   if (typeof value !== "string") throw new FrameError("ciphertext is not a string");
   if (fromBase64(value).length === 0) throw new FrameError("ciphertext is empty");
-  return value;
-}
-
-function readSubscriberCount(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new FrameError("presence count is not a non-negative integer");
-  }
   return value;
 }
 

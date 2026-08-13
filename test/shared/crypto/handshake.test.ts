@@ -18,8 +18,9 @@ const PSK = generatePsk();
  * appearing to work.
  *
  * The keypairs are written out rather than generated from a seed because
- * `check:no-v1` allows the `@noble/curves/ed25519.js` import in exactly one
- * file — the handshake itself — so a test cannot reach the curve directly.
+ * `check:no-v1` allows the `@noble/curves` module that exports X25519 to be
+ * imported in exactly one file — the handshake itself — so a test cannot reach
+ * the curve directly.
  * `lower` and `higher` name which of the two public keys sorts lower, which is
  * what decides the direction of each chain.
  */

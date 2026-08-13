@@ -3,21 +3,29 @@ import * as readline from "node:readline/promises";
 import { nickProblem } from "../shared/protocol/text.ts";
 import type { SessionHandlers } from "./session.ts";
 
-export const DEFAULT_RELAY_URL = "ws://localhost:8787";
 export const DEFAULT_RELAY_PORT = 8787;
+
+/** Printed to stderr, never to stdout: the invite itself is what gets piped or
+ * copied, and a warning mixed into it would travel with it. */
+export const SCROLLBACK_WARNING =
+  "this invite is now in your terminal scrollback — clear it once the other side has it";
 
 export const HELP = `termino — end-to-end encrypted terminal chat
 
 Usage:
-  termino [--channel <name>] [--nick <name>] [--relay <url>] [--insecure]
-      Client. Prompts for the channel password on stdin without echoing it,
-      derives keys, connects, then mounts the TUI. --channel and --nick are
-      prompted for on stdin if omitted. Default --relay is ${DEFAULT_RELAY_URL}.
+  termino new --relay <url> [--nick <name>]
+      Generates a secret, prints an invite, and joins the channel it names.
+      The invite is the whole secret: whoever holds it can talk to you, so
+      carry it to the other person by a route you trust.
 
       A --relay with no scheme is read as wss://. Plain ws:// is refused for
       every host but localhost, 127.0.0.1 and [::1]: nothing authenticates a
       relay, so an unencrypted connection to a remote one can be dropped or
       delayed by anyone on the path. --insecure permits it anyway.
+
+  termino join <invite> [--nick <name>]
+      Joins the channel an invite names. The relay comes from the invite, so
+      --relay is not accepted here.
 
   termino serve [--port <n>]
       Relay. Default port ${DEFAULT_RELAY_PORT}, WebSocket path /.
@@ -25,8 +33,8 @@ Usage:
   termino --help
       Show this message.
 
-The channel password is never accepted as a flag — it would land in shell
-history and in the output of \`ps\`.
+There is no password and no channel name. The secret is generated, never
+typed: a secret a person chooses is one an attacker can guess offline.
 `;
 
 export class UsageError extends Error {}
@@ -40,22 +48,33 @@ export interface ServeCommand {
   port: number;
 }
 
-export interface ClientCommand {
-  mode: "client";
-  channel?: string;
+/** Mints a secret and prints the invite for it. */
+export interface NewCommand {
+  mode: "new";
+  /** Prompted for on stdin when the flag is absent, as in v1. */
   nick?: string;
   relay: string;
 }
 
-export type Command = HelpCommand | ServeCommand | ClientCommand;
+/** Joins a channel somebody else's invite names. */
+export interface JoinCommand {
+  mode: "join";
+  nick?: string;
+  invite: string;
+}
+
+export type Command = HelpCommand | ServeCommand | NewCommand | JoinCommand;
 
 export function parseArgs(argv: string[]): Command {
   if (argv.includes("--help") || argv.includes("-h")) return { mode: "help" };
 
   const [first, ...rest] = argv;
-  if (first === "serve") return parseServeArgs(rest);
 
-  return parseClientArgs(argv);
+  if (first === "serve") return parseServeArgs(rest);
+  if (first === "new") return parseNewArgs(rest);
+  if (first === "join") return parseJoinArgs(rest);
+
+  throw new UsageError(`expected new, join or serve, got: ${first ?? "nothing"}\n\n${HELP}`);
 }
 
 function parseServeArgs(argv: string[]): ServeCommand {
@@ -70,6 +89,34 @@ function parseServeArgs(argv: string[]): ServeCommand {
   return { mode: "serve", port };
 }
 
+/**
+ * `--relay` is required rather than defaulted. A silent `ws://localhost:8787`
+ * would mint invites that work on one machine and fail as silence everywhere
+ * else, which is the failure mode the channel name was deleted to avoid.
+ */
+function parseNewArgs(argv: string[]): NewCommand {
+  const { values, switches } = readFlags(argv, ["--nick", "--relay"], ["--insecure"]);
+
+  const relay = values.get("--relay");
+  if (relay === undefined) throw new UsageError("new requires --relay <url>: an invite has to say where to meet");
+
+  return {
+    mode: "new",
+    nick: readNickFlag(values.get("--nick")),
+    relay: resolveRelayUrl(relay, switches.has("--insecure")),
+  };
+}
+
+function parseJoinArgs(argv: string[]): JoinCommand {
+  const [invite, ...rest] = argv;
+  if (invite === undefined || invite.startsWith("-"))
+    throw new UsageError(`join requires an invite: termino join <words>@<host>\n\n${HELP}`);
+
+  const { values } = readFlags(rest, ["--nick"]);
+
+  return { mode: "join", nick: readNickFlag(values.get("--nick")), invite };
+}
+
 /** A nickname is drawn into the status bar and next to every line this client
  * sends, so the rule that protects the reader from a peer's nickname has to
  * protect them from their own too. It can arrive from a launch script, a
@@ -79,18 +126,20 @@ function checkNick(nick: string, source: string): void {
   if (problem !== null) throw new UsageError(`${source} is not usable: ${problem}`);
 }
 
-function parseClientArgs(argv: string[]): ClientCommand {
-  const { values, switches } = readFlags(argv, ["--channel", "--nick", "--relay"], ["--insecure"]);
+function readNickFlag(given: string | undefined): string | undefined {
+  if (given === undefined) return undefined;
 
-  const nick = values.get("--nick");
-  if (nick !== undefined) checkNick(nick, "--nick");
+  checkNick(given, "--nick");
+  return given;
+}
 
-  return {
-    mode: "client",
-    channel: values.get("--channel"),
-    nick,
-    relay: resolveRelayUrl(values.get("--relay") ?? DEFAULT_RELAY_URL, switches.has("--insecure")),
-  };
+/** The other route in: a nickname typed at the prompt reaches the same status
+ * bar, so it is held to the same rule. Exported because the caller that prompts
+ * cannot be driven from a test — it reads stdin and ends in a renderer that
+ * hangs without a TTY. */
+export function checkPromptedNick(nick: string): void {
+  if (nick === "") throw new UsageError("a nickname is required");
+  checkNick(nick, "the nickname");
 }
 
 /** Loopback carries no network an attacker can sit on. `URL.hostname` keeps
@@ -108,7 +157,7 @@ const SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
  * here rather than inside the renderer, where the only symptom would be a
  * connection that never opens behind a full-screen interface.
  */
-function resolveRelayUrl(given: string, insecure: boolean): string {
+export function resolveRelayUrl(given: string, insecure: boolean): string {
   const withScheme = SCHEME_PATTERN.test(given) ? given : `wss://${given}`;
 
   let parsed: URL;
@@ -150,9 +199,6 @@ function readFlags(
   while (index < argv.length) {
     const token = argv[index]!;
 
-    if (token === "--password" || token === "--pass")
-      throw new UsageError("the channel password is never accepted as a flag; termino prompts for it");
-
     if (switches.includes(token)) {
       seen.add(token);
       index += 1;
@@ -182,48 +228,6 @@ async function promptLine(question: string): Promise<string> {
   }
 }
 
-/** Reads a line without echoing it, so the password never lands on screen. */
-async function promptPassword(question: string): Promise<string> {
-  if (!stdin.isTTY) return await promptLine(question);
-
-  stdout.write(question);
-  stdin.setRawMode(true);
-  stdin.resume();
-  stdin.setEncoding("utf8");
-
-  const typed: string[] = [];
-
-  return await new Promise<string>((resolve) => {
-    const stop = () => {
-      stdin.off("data", onData);
-      stdin.setRawMode(false);
-      stdin.pause();
-      stdout.write("\n");
-    };
-
-    const onData = (chunk: string) => {
-      for (const char of chunk) {
-        if (char === "\r" || char === "\n") {
-          stop();
-          resolve(typed.join(""));
-          return;
-        }
-        if (char === "\u0003") {
-          stop();
-          process.exit(130);
-        }
-        if (char === "\u007f" || char === "\b") {
-          typed.pop();
-          continue;
-        }
-        typed.push(char);
-      }
-    };
-
-    stdin.on("data", onData);
-  });
-}
-
 /**
  * Loads the React renderer with `DEV` cleared.
  *
@@ -233,50 +237,55 @@ async function promptPassword(question: string): Promise<string> {
  * the import because the gate is read as the module evaluates; clearing it
  * afterwards would be too late.
  *
- * Exported so the clearing can be tested on its own: the caller below prompts
- * on stdin, spends ~850 ms in argon2id and ends in a renderer that hangs
- * without a TTY, none of which a test can drive.
+ * Exported so the clearing can be tested on its own: the caller below ends in a
+ * renderer that hangs without a TTY, which a test cannot drive.
  */
 export async function loadRenderer(): Promise<typeof import("@opentui/react")> {
   delete process.env.DEV;
   return await import("@opentui/react");
 }
 
-/** Both routes into a session end here — a `--nick` flag and a nickname typed
- * at the prompt — so neither can reach the status bar unchecked. Exported
- * because `runClient` itself is not drivable from a test: it reads stdin,
- * spends ~850 ms in argon2id, and ends in a renderer that hangs without a TTY. */
-export function checkClientInput(channel: string, nick: string, password: string): void {
-  if (channel === "" || nick === "" || password === "")
-    throw new UsageError("channel, nickname and password are all required");
-  checkNick(nick, "the nickname");
+/**
+ * Mints a secret, says it out loud once, and joins the channel it names.
+ *
+ * The invite goes to stdout so it stays pipeable and copy-pasteable; the
+ * warning goes to stderr so it never travels with the thing it warns about.
+ */
+async function runNew(command: NewCommand): Promise<void> {
+  const { generatePsk } = await import("../shared/crypto/psk.ts");
+  const { formatInvite } = await import("../shared/protocol/invite.ts");
+
+  const psk = generatePsk();
+
+  stdout.write(`${formatInvite(psk, command.relay)}\n`);
+  process.stderr.write(`${SCROLLBACK_WARNING}\n`);
+
+  await runChat(psk, command.relay, command.nick);
 }
 
-async function runClient(command: ClientCommand): Promise<void> {
-  const channel = command.channel ?? (await promptLine("Channel: "));
-  const nick = command.nick ?? (await promptLine("Nickname: "));
-  const password = await promptPassword("Password: ");
+async function runJoin(command: JoinCommand): Promise<void> {
+  const { InvalidInviteError, parseInvite } = await import("../shared/protocol/invite.ts");
 
-  checkClientInput(channel, nick, password);
+  try {
+    const invite = parseInvite(command.invite);
+    await runChat(invite.psk, invite.relay, command.nick);
+  } catch (error) {
+    if (error instanceof InvalidInviteError) throw new UsageError(error.message);
+    throw error;
+  }
+}
 
-  // Everything up to and including derivation happens on the plain terminal,
-  // before any renderer exists. argon2id blocks for ~850 ms; paying it with a
-  // renderer already on screen would freeze a drawn interface instead of
-  // pausing a printed prompt.
-  const { loadOrCreateIdentity } = await import("../shared/crypto/identity.ts");
-  const { deriveChannelKeys } = await import("../shared/crypto/derive.ts");
-  const { fingerprint } = await import("../shared/crypto/fingerprint.ts");
+async function runChat(psk: Uint8Array, relayUrl: string, given: string | undefined): Promise<void> {
+  const nick = given ?? (await promptLine("Nickname: "));
+  checkPromptedNick(nick);
+
   const { startSession } = await import("./session.ts");
 
-  const identity = loadOrCreateIdentity();
-  stdout.write("deriving channel keys…\n");
-  const keys = deriveChannelKeys(channel, password);
-
-  // The screen never holds the device key or the channel key. They are
-  // captured here instead, where the only thing that crosses into React is a
-  // function — and a function is not something devtools can serialise.
+  // The screen never holds the secret. It is captured here instead, where the
+  // only thing that crosses into React is a function — and a function is not
+  // something devtools can serialise.
   const connect = (handlers: SessionHandlers) =>
-    startSession({ keys, nick, identity, relayUrl: command.relay, handlers });
+    startSession({ psk, nick, relayUrl, handlers });
 
   // Imported here rather than at the top of the file so `--help` never loads
   // the renderer at all: constructing one without a TTY hangs. `App.tsx` comes
@@ -296,15 +305,7 @@ async function runClient(command: ClientCommand): Promise<void> {
     process.exit(0);
   };
 
-  root.render(
-    createElement(App, {
-      channel,
-      nick,
-      fingerprint: fingerprint(identity.publicKey),
-      connect,
-      onExit,
-    }),
-  );
+  root.render(createElement(App, { nick, connect, onExit }));
 }
 
 async function runServe(command: ServeCommand): Promise<void> {
@@ -318,8 +319,8 @@ async function runServe(command: ServeCommand): Promise<void> {
 }
 
 export async function main(argv: string[]): Promise<number> {
-  // The whole body, not just `parseArgs`: the prompts in `runClient` raise
-  // UsageError too, and that is the path most users reach it by.
+  // The whole body, not just `parseArgs`: a malformed invite raises UsageError
+  // from `runJoin` too, and that is the path most users reach it by.
   try {
     const command = parseArgs(argv);
 
@@ -333,7 +334,9 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
-    await runClient(command);
+    if (command.mode === "new") await runNew(command);
+    else await runJoin(command);
+
     return 0;
   } catch (error) {
     if (!(error instanceof UsageError)) throw error;

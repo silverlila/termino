@@ -3,28 +3,19 @@
  * else is a message.
  *
  * Parsing is kept apart from acting on the result. This module knows nothing
- * about the trust store, the session or the screen, so the whole grammar —
- * including what counts as a badly written command — is decidable from a
- * string alone.
+ * about the session or the screen, so the whole grammar — including what counts
+ * as a badly written command — is decidable from a string alone.
  */
 
 /** What `/help` prints, and the list `parseComposerInput` recognises. */
 export const COMMANDS = [
-  {
-    usage: "/verify <nick> <fingerprint>",
-    summary: "mark a peer verified, once you have compared fingerprints elsewhere",
-  },
   { usage: "/help", summary: "list these commands" },
   { usage: "/exit", summary: "leave the channel and close termino" },
 ] as const;
 
-export const VERIFY_USAGE = `usage: ${COMMANDS[0].usage}`;
-
 export type ComposerInput =
   /** Send this. */
   | { kind: "message"; body: string }
-  /** Check `fingerprint` against the key stored for `nick`. */
-  | { kind: "verify"; nick: string; fingerprint: string }
   /** List the commands. */
   | { kind: "help" }
   /** Close the session and the program. */
@@ -38,18 +29,10 @@ export function parseComposerInput(line: string): ComposerInput {
   const trimmed = line.trim();
   if (!trimmed.startsWith("/")) return { kind: "message", body: trimmed };
 
-  const [name = "", ...rest] = trimmed.split(/\s+/);
+  const [name = ""] = trimmed.split(/\s+/);
 
   if (name === "/help") return { kind: "help" };
   if (name === "/exit") return { kind: "exit" };
 
-  if (name !== "/verify")
-    return { kind: "unusable", reason: `unknown command ${name} — /help lists them` };
-
-  const [nick, ...words] = rest;
-  if (nick === undefined || words.length === 0) return { kind: "unusable", reason: VERIFY_USAGE };
-
-  // Everything after the nickname is the fingerprint. It is eight words, so
-  // reading only the next token would reject every correct spelling of it.
-  return { kind: "verify", nick, fingerprint: words.join(" ") };
+  return { kind: "unusable", reason: `unknown command ${name} — /help lists them` };
 }

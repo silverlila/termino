@@ -1,21 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-  bytesFromWords,
-  fingerprint,
-  UnknownWordError,
-  words,
-} from "../../../shared/crypto/fingerprint.ts";
+import { bytesFromWords, UnknownWordError, words } from "../../../shared/crypto/fingerprint.ts";
 import { WORDLIST } from "../../../shared/crypto/wordlist.ts";
-
-/** Recorded on first implementation. Pins both the byte-to-word mapping and
- * the order of the wordlist, either of which would silently change every
- * fingerprint users have already verified. */
-const VECTOR = {
-  publicKey: Uint8Array.from({ length: 32 }, (_, index) => index),
-  words: "hobby birch site daisy hundred satin double hundred",
-};
-
-const OTHER_KEY = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
 
 /** Computed independently of the wordlist's construction, so this test can
  * actually disagree with the list rather than restating it. */
@@ -100,30 +85,5 @@ describe("the byte-to-word codec", () => {
   test("throws naming the word that is not in the list", () => {
     expect(() => bytesFromWords("acorn agent yoghurt")).toThrow(UnknownWordError);
     expect(() => bytesFromWords("acorn agent yoghurt")).toThrow(/yoghurt/);
-  });
-});
-
-describe("fingerprint", () => {
-  test("produces the recorded known-answer words for a fixed public key", () => {
-    expect(fingerprint(VECTOR.publicKey)).toBe(VECTOR.words);
-  });
-
-  test("returns exactly 8 whitespace-separated tokens", () => {
-    expect(fingerprint(VECTOR.publicKey).split(/\s+/)).toHaveLength(8);
-  });
-
-  test("returns only words drawn from the wordlist, never hexadecimal", () => {
-    const tokens = fingerprint(OTHER_KEY).split(/\s+/);
-    const strangers = tokens.filter((token) => !WORDLIST.includes(token));
-
-    expect(strangers).toEqual([]);
-  });
-
-  test("two different public keys produce different fingerprints", () => {
-    expect(fingerprint(OTHER_KEY)).not.toBe(fingerprint(VECTOR.publicKey));
-  });
-
-  test("is deterministic for the same key", () => {
-    expect(fingerprint(VECTOR.publicKey)).toBe(fingerprint(VECTOR.publicKey));
   });
 });

@@ -96,8 +96,15 @@ export interface ReceivingChain {
    * lowest first — the open gaps, which is what a "never arrived" notice
    * counts. */
   skipped(): number[];
-  /** Zeroes the chain and every cached key. Nothing may be taken afterwards. */
-  wipe(): void;
+  /**
+   * Zeroes the chain and every cached key. Nothing may be taken afterwards.
+   *
+   * Returns the buffers it overwrote, every one of them now all zeros. The
+   * cache is private, so without this "the keys are gone" would be a claim
+   * about state nothing outside can look at — and a security claim nobody can
+   * check is one nobody should believe.
+   */
+  wipe(): Uint8Array[];
 }
 
 /**
@@ -181,11 +188,16 @@ export function startReceiving(chain: Uint8Array): ReceivingChain {
     return [...cache.keys()];
   }
 
-  function wipe(): void {
+  function wipe(): Uint8Array[] {
+    const cached = [...cache.values()].flatMap((entry) => [entry.key, entry.nonce]);
+    const overwritten = [current, ...cached];
+
     current.fill(0);
     for (const messageKey of cache.values()) wipeKey(messageKey);
     cache.clear();
     wiped = true;
+
+    return overwritten;
   }
 
   return { take, skipped, wipe };
