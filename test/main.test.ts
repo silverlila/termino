@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { type ClientCommand, DEFAULT_RELAY_URL, loadRenderer, parseArgs, UsageError } from "../src/main.ts";
+import {
+  checkClientInput,
+  type ClientCommand,
+  DEFAULT_RELAY_URL,
+  loadRenderer,
+  parseArgs,
+  UsageError,
+} from "../src/main.ts";
 
 /**
  * The CLI, at the seams a test can reach. `runClient` and `main` are not among
@@ -96,5 +103,29 @@ describe("nick", () => {
   it("rejects a --nick longer than 32 bytes", () => {
     expect(() => client(["--nick", "a".repeat(33)])).toThrow(UsageError);
     expect(() => client(["--nick", "a".repeat(33)])).toThrow(/33 UTF-8 bytes, over the limit of 32/);
+  });
+
+  // The flag is not the only way in. A nickname typed at the prompt reaches the
+  // same status bar, so the same rule has to hold there.
+  it("rejects a prompted nickname containing a control character", () => {
+    expect(() => checkClientInput("demo", clearScreen, "pw")).toThrow(UsageError);
+    expect(() => checkClientInput("demo", clearScreen, "pw")).toThrow(/U\+001B/);
+  });
+
+  it("rejects a prompted nickname longer than 32 bytes", () => {
+    expect(() => checkClientInput("demo", "a".repeat(33), "pw")).toThrow(UsageError);
+    expect(() => checkClientInput("demo", "a".repeat(33), "pw")).toThrow(
+      /33 UTF-8 bytes, over the limit of 32/,
+    );
+  });
+
+  it("accepts an ordinary prompted nickname", () => {
+    expect(() => checkClientInput("demo", "alice", "pw")).not.toThrow();
+  });
+
+  it("requires a channel, a nickname and a password", () => {
+    expect(() => checkClientInput("", "alice", "pw")).toThrow(/all required/);
+    expect(() => checkClientInput("demo", "", "pw")).toThrow(/all required/);
+    expect(() => checkClientInput("demo", "alice", "")).toThrow(/all required/);
   });
 });

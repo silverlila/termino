@@ -70,18 +70,20 @@ function parseServeArgs(argv: string[]): ServeCommand {
   return { mode: "serve", port };
 }
 
+/** A nickname is drawn into the status bar and next to every line this client
+ * sends, so the rule that protects the reader from a peer's nickname has to
+ * protect them from their own too. It can arrive from a launch script, a
+ * pasted command, or a prompt answered without reading it back. */
+function checkNick(nick: string, source: string): void {
+  const problem = nickProblem(nick);
+  if (problem !== null) throw new UsageError(`${source} is not usable: ${problem}`);
+}
+
 function parseClientArgs(argv: string[]): ClientCommand {
   const { values, switches } = readFlags(argv, ["--channel", "--nick", "--relay"], ["--insecure"]);
 
   const nick = values.get("--nick");
-  if (nick !== undefined) {
-    // A nickname is drawn into the status bar and next to every line this
-    // client sends, so the rule that protects the reader from a peer's
-    // nickname has to protect them from their own too — a --nick can arrive
-    // from a launch script or a pasted command nobody read.
-    const problem = nickProblem(nick);
-    if (problem !== null) throw new UsageError(`--nick is not usable: ${problem}`);
-  }
+  if (nick !== undefined) checkNick(nick, "--nick");
 
   return {
     mode: "client",
@@ -240,13 +242,22 @@ export async function loadRenderer(): Promise<typeof import("@opentui/react")> {
   return await import("@opentui/react");
 }
 
+/** Both routes into a session end here — a `--nick` flag and a nickname typed
+ * at the prompt — so neither can reach the status bar unchecked. Exported
+ * because `runClient` itself is not drivable from a test: it reads stdin,
+ * spends ~850 ms in argon2id, and ends in a renderer that hangs without a TTY. */
+export function checkClientInput(channel: string, nick: string, password: string): void {
+  if (channel === "" || nick === "" || password === "")
+    throw new UsageError("channel, nickname and password are all required");
+  checkNick(nick, "the nickname");
+}
+
 async function runClient(command: ClientCommand): Promise<void> {
   const channel = command.channel ?? (await promptLine("Channel: "));
   const nick = command.nick ?? (await promptLine("Nickname: "));
   const password = await promptPassword("Password: ");
 
-  if (channel === "" || nick === "" || password === "")
-    throw new UsageError("channel, nickname and password are all required");
+  checkClientInput(channel, nick, password);
 
   // Everything up to and including derivation happens on the plain terminal,
   // before any renderer exists. argon2id blocks for ~850 ms; paying it with a
