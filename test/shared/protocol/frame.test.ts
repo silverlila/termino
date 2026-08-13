@@ -73,6 +73,12 @@ describe("version checking", () => {
 });
 
 describe("size limits", () => {
+  it("caps a frame at 8192 bytes", () => {
+    // Written out rather than derived: the ceiling is a wire-contract value,
+    // so this must be able to disagree with the module.
+    expect(MAX_FRAME_BYTES).toBe(8192);
+  });
+
   it("accepts a frame just under the limit", () => {
     const padding = "A".repeat(1000);
     const frame = encodeFrame(msgFrame(HANDLE, NONCE, new TextEncoder().encode(padding)));
@@ -81,7 +87,7 @@ describe("size limits", () => {
     expect(decodeFrame(frame).t).toBe("msg");
   });
 
-  it("rejects a frame larger than 64 KiB", () => {
+  it("rejects a frame larger than 8192 bytes before parsing it", () => {
     const oversized = encodeFrame(
       msgFrame(HANDLE, NONCE, new TextEncoder().encode("A".repeat(MAX_FRAME_BYTES))),
     );

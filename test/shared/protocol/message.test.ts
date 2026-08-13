@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { pad, unpad } from "../../../shared/crypto/pad.ts";
 import { DecryptError, open, seal } from "../../../shared/crypto/seal.ts";
 import { fromBase64, msgFrame } from "../../../shared/protocol/frame.ts";
 import {
@@ -24,6 +25,16 @@ const SECRET_KEY = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const PUBLIC_KEY_HEX = bytesToHex(ed25519.getPublicKey(SECRET_KEY));
 
 const OTHER_SECRET_KEY = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
+
+/**
+ * The bytes a client actually seals: the serialised payload, padded to a size
+ * bucket. Spelt out here because the cases below deliberately bypass
+ * `sealMessage` — a frame built without the padding layer is not one this
+ * protocol could have produced.
+ */
+function plaintextOf(value: unknown): Uint8Array {
+  return pad(new TextEncoder().encode(JSON.stringify(value)));
+}
 
 function payloadFrom(overrides: Partial<Payload> = {}): Payload {
   return {
@@ -169,10 +180,7 @@ describe("sealing and opening", () => {
     // The same 64 bytes with the base64 padding dropped: a different string
     // that decodes identically, and still verifies.
     const respelt = { ...signed, sig: signed.sig.replace(/=+$/, "") };
-    const { nonce, ciphertext } = await seal(
-      MSG_KEY,
-      new TextEncoder().encode(JSON.stringify(respelt)),
-    );
+    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf(respelt));
 
     const opened = await openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext));
 
@@ -184,10 +192,7 @@ describe("sealing and opening", () => {
   it("rejects a signature that is not the length of one", async () => {
     const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
     const truncated = { ...signed, sig: signed.sig.slice(0, 20) };
-    const { nonce, ciphertext } = await seal(
-      MSG_KEY,
-      new TextEncoder().encode(JSON.stringify(truncated)),
-    );
+    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf(truncated));
 
     await expect(openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext))).rejects.toBeInstanceOf(
       PayloadError,
@@ -195,8 +200,7 @@ describe("sealing and opening", () => {
   });
 
   it("rejects ciphertext that decrypts to something that is not a payload", async () => {
-    const junk = new TextEncoder().encode(JSON.stringify({ hello: "world" }));
-    const { nonce, ciphertext } = await seal(MSG_KEY, junk);
+    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf({ hello: "world" }));
 
     await expect(openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext))).rejects.toBeInstanceOf(
       PayloadError,
@@ -210,10 +214,7 @@ describe("hostile text", () => {
    * or somebody speaking the protocol by hand, would put on the wire. */
   async function sealWithoutChecking(payload: Payload) {
     const signed = sign(payload, HANDLE, SECRET_KEY);
-    const { nonce, ciphertext } = await seal(
-      MSG_KEY,
-      new TextEncoder().encode(JSON.stringify(signed)),
-    );
+    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf(signed));
     return msgFrame(HANDLE, nonce, ciphertext);
   }
 
@@ -276,6 +277,37 @@ describe("hostile text", () => {
   });
 });
 
+describe("padding", () => {
+  async function sealedBytes(body: string): Promise<number> {
+    const frame = await sealMessage({
+      msgKey: MSG_KEY,
+      handle: HANDLE,
+      payload: payloadFrom({ body }),
+      secretKey: SECRET_KEY,
+    });
+    return fromBase64(frame.c).length;
+  }
+
+  it("hides the length of two bodies three hundred bytes apart", async () => {
+    // AES-GCM ciphertext is the plaintext length plus a 16-byte tag, so
+    // without padding the relay would read the size of every message off the
+    // wire without decrypting anything. Both of these land in one bucket.
+    expect(await sealedBytes("a".repeat(400))).toBe(await sealedBytes("a".repeat(700)));
+  });
+
+  it("hides the length of the short messages people actually send", async () => {
+    // The case the module exists for: the difference between "a message
+    // moved" and "they typed yes".
+    expect(await sealedBytes("yes")).toBe(await sealedBytes("on my way, five minutes"));
+  });
+
+  it("still tells a short message from a long one across buckets", async () => {
+    // Five buckets, so the leak is a bucket rather than a byte — not nothing,
+    // and this records which half of the trade is being made.
+    expect(await sealedBytes("yes")).toBeLessThan(await sealedBytes("a".repeat(1900)));
+  });
+});
+
 describe("cross-channel replay", () => {
   it("refuses a message lifted out of one channel and re-sealed into another", async () => {
     // Mallory belongs to both channels, so she legitimately holds both message
@@ -320,7 +352,7 @@ describe("sign-before-encrypt ordering", () => {
     // What is actually inside it: the signature, sealed along with everything
     // it covers. This is what makes the ordering a demonstrated fact.
     const plaintext = await open(MSG_KEY, fromBase64(frame.n), fromBase64(frame.c));
-    const inner = JSON.parse(new TextDecoder().decode(plaintext));
+    const inner = JSON.parse(new TextDecoder().decode(unpad(plaintext)));
 
     expect(inner).toHaveProperty("sig");
     expect(inner.from).toBe(PUBLIC_KEY_HEX);

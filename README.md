@@ -174,6 +174,15 @@ object key order is not guaranteed, and with the handle leading so a message can
 out of one channel and replayed into another. Signing happens before encryption, so `sig` is
 inside the envelope.
 
+That JSON is **padded to** a size bucket before it is encrypted: a two-byte big-endian length,
+then the payload, then zeroes out to the next of `256, 512, 1024, 2048, 4096` bytes. AES-GCM
+ciphertext is the plaintext length plus a 16-byte tag, so without this the relay would read the
+size of every message to the byte — the difference between "a message moved" and "they typed
+*yes*". Five buckets leave it roughly 2.3 bits of length instead. This is why a message body is
+capped at **1900 UTF-8 bytes**: the padded unit is the serialised payload, and `JSON.stringify`
+doubles every quote and backslash, so a larger cap would not fit the top bucket. The two
+numbers cannot be changed independently.
+
 A signature says who wrote a message, not *when* — and a handle travels in the clear, so
 anybody watching the wire can subscribe and send a frame they captured back again without ever
 holding the password. So a client also refuses any signature it has already shown, and anything
@@ -183,7 +192,8 @@ back twice this minute. Either way the message is reported on screen rather than
 quietly, and it never reaches the trust store — otherwise a recording of the key somebody used
 last month would raise `!! KEY CHANGED` against the key they hold today.
 
-The relay drops any frame over 64 KiB, any frame whose `h` is not 32 lowercase hex characters,
+The relay drops any frame over **8 KiB** — the largest padded message is well under it — any
+frame whose `h` is not 32 lowercase hex characters,
 and any `msg` sent before a `sub`. It rate-limits per connection, five messages per ten seconds.
 
 ## Layout

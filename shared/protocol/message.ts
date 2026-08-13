@@ -1,6 +1,7 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { PUBLIC_KEY_PATTERN } from "../crypto/identity.ts";
+import { pad, unpad } from "../crypto/pad.ts";
 import { open, seal } from "../crypto/seal.ts";
 import { fromBase64, msgFrame, toBase64, type MsgFrame } from "./frame.ts";
 import { bodyProblem, nickProblem } from "./text.ts";
@@ -89,12 +90,17 @@ export function verify(signed: SignedPayload, handle: string): boolean {
 }
 
 /**
- * Signs, then encrypts, then wraps in the outer frame — in that order.
+ * Signs, then pads, then encrypts, then wraps in the outer frame — in that
+ * order.
  *
  * The text rules are applied here as well as on arrival, so this client cannot
  * be the one sending a body that every honest recipient will refuse. Refusing
  * rather than trimming: the signature covers the exact bytes, so a body quietly
  * rewritten on the way out is one the sender never wrote.
+ *
+ * Padding wraps the serialised payload rather than the body, because the body
+ * is not what the relay measures — the sealed JSON is. `seal` itself stays
+ * generic and knows nothing about any of this.
  */
 export async function sealMessage(input: {
   msgKey: Uint8Array;
@@ -106,20 +112,21 @@ export async function sealMessage(input: {
   if (problem !== null) throw new PayloadError(problem);
 
   const signed = sign(input.payload, input.handle, input.secretKey);
-  const { nonce, ciphertext } = await seal(input.msgKey, utf8(JSON.stringify(signed)));
+  const { nonce, ciphertext } = await seal(input.msgKey, pad(utf8(JSON.stringify(signed))));
   return msgFrame(input.handle, nonce, ciphertext);
 }
 
 /**
  * Decrypts and verifies an inbound frame. Throws `DecryptError` if the
- * ciphertext does not authenticate, `PayloadError` if it decrypts to something
- * that is not a payload, and `SignatureError` if the signature does not match
- * the key it claims, or was made for a different channel. Only a fully
- * verified payload is ever returned.
+ * ciphertext does not authenticate, `PaddingError` if what it decrypts to is
+ * not padded the way this protocol pads, `PayloadError` if it decrypts to
+ * something that is not a payload, and `SignatureError` if the signature does
+ * not match the key it claims, or was made for a different channel. Only a
+ * fully verified payload is ever returned.
  */
 export async function openMessage(msgKey: Uint8Array, frame: MsgFrame): Promise<SignedPayload> {
   const plaintext = await open(msgKey, fromBase64(frame.n), fromBase64(frame.c));
-  const signed = parsePayload(new TextDecoder().decode(plaintext));
+  const signed = parsePayload(new TextDecoder().decode(unpad(plaintext)));
 
   if (!verify(signed, frame.h)) throw new SignatureError();
 

@@ -11,9 +11,12 @@
 /** Bumped only for a breaking change. Unknown versions are rejected, not ignored. */
 export const PROTOCOL_VERSION = 1;
 
-/** A frame larger than this is dropped before it is parsed. Bodies are short;
- * anything approaching this size is an amplification attempt. */
-export const MAX_FRAME_BYTES = 64 * 1024;
+/** A frame larger than this is dropped before it is parsed. The plaintext is
+ * padded to at most 4096 bytes, which base64s to roughly 5.5 KB once the tag
+ * and the envelope are counted — so anything approaching 8 KiB is an
+ * amplification attempt rather than a message. Written out rather than
+ * imported: this module may not depend on `shared/crypto/`. */
+export const MAX_FRAME_BYTES = 8192;
 
 /** Duplicated from `crypto/seal.ts` rather than imported, because this module
  * may not depend on crypto. The two must agree. */

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { pad } from "../../shared/crypto/pad.ts";
 import { seal } from "../../shared/crypto/seal.ts";
 import { encodeFrame, msgFrame, subFrame } from "../../shared/protocol/frame.ts";
 import { sign } from "../../shared/protocol/message.ts";
@@ -52,9 +53,12 @@ async function sendHostileBody(nick: string, body: string): Promise<void> {
     CHANNEL_KEYS.handle,
     HOSTILE_SECRET_KEY,
   );
+  // Padded, like every honest frame: an unpadded plaintext would be refused by
+  // `unpad` before the text rules ever ran, so the probe would pass for the
+  // wrong reason.
   const { nonce, ciphertext } = await seal(
     CHANNEL_KEYS.msgKey,
-    new TextEncoder().encode(JSON.stringify(signed)),
+    pad(new TextEncoder().encode(JSON.stringify(signed))),
   );
 
   const socket = new WebSocket(relay.url);
