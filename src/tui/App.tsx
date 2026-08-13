@@ -93,7 +93,38 @@ interface NoticeLine {
   tone: NoticeTone;
 }
 
-type TranscriptLine = MessageLine | NoticeLine;
+export type TranscriptLine = MessageLine | NoticeLine;
+
+/**
+ * How much transcript is kept. Nothing ever removed an entry before, so a long
+ * session — or a peer sending at the relay's rate limit for an afternoon —
+ * grew the array until the process died of it.
+ */
+export const MAX_TRANSCRIPT_LINES = 2000;
+
+/** Appends, dropping from the front once the transcript is full. */
+export function appendCapped(
+  previous: TranscriptLine[],
+  line: TranscriptLine,
+  cap = MAX_TRANSCRIPT_LINES,
+): TranscriptLine[] {
+  const grown = [...previous, line];
+  if (grown.length <= cap) return grown;
+
+  return grown.slice(grown.length - cap);
+}
+
+/**
+ * The one line a flood of unopenable frames gets.
+ *
+ * A handle travels in the clear, so anyone who learns one can subscribe and
+ * send garbage to every member of the channel. A notice per frame would hand
+ * them the screen; a count on a single line says the same thing once.
+ */
+function unopenedNotice(count: number): string {
+  const messages = count === 1 ? "message" : "messages";
+  return `could not open ${count} ${messages} — someone may be sending noise`;
+}
 
 /** A line before the transcript has given it its position. */
 type LineDraft = Omit<MessageLine, "id"> | Omit<NoticeLine, "id">;
@@ -113,10 +144,15 @@ function useChat(options: AppProps): Chat {
   const [presence, setPresence] = useState(1);
   const session = useRef<Session | null>(null);
   const nextId = useRef(0);
+  // The flood counter, and the line it is being written on. A ref because it
+  // is read and written inside the session callbacks, which are built once.
+  const unopened = useRef<{ count: number; lineId: string | null }>({ count: 0, lineId: null });
 
-  const append = useCallback((draft: LineDraft) => {
+  /** Adds a line and hands back its id, so a line can be rewritten later. */
+  const append = useCallback((draft: LineDraft): string => {
     const id = String(nextId.current++);
-    setLines((previous) => [...previous, { ...draft, id }]);
+    setLines((previous) => appendCapped(previous, { ...draft, id }));
+    return id;
   }, []);
 
   const notice = useCallback(
@@ -124,6 +160,27 @@ function useChat(options: AppProps): Chat {
       append({ kind: "notice", text, ts: Date.now(), tone }),
     [append],
   );
+
+  // Rewrites the running count where it already sits rather than appending
+  // another line: a trail of "…and one more" notices is the same flood with
+  // extra steps.
+  const countUnopened = useCallback(() => {
+    const state = unopened.current;
+    state.count += 1;
+    const text = unopenedNotice(state.count);
+
+    if (state.lineId === null) {
+      state.lineId = append({ kind: "notice", text, ts: Date.now(), tone: "info" });
+      return;
+    }
+
+    const lineId = state.lineId;
+    setLines((previous) =>
+      previous.map((line) =>
+        line.id === lineId && line.kind === "notice" ? { ...line, text } : line,
+      ),
+    );
+  }, [append]);
 
   // Runs once. A session is bound to one channel and one identity for its
   // whole life, so re-running this on a prop change would tear down a live
@@ -133,7 +190,11 @@ function useChat(options: AppProps): Chat {
 
     options
       .connect({
-        onMessage: (message) =>
+        onMessage: (message) => {
+          // A message that opened means the flood, if there was one, is over:
+          // the next one that fails starts its own count on its own line.
+          unopened.current = { count: 0, lineId: null };
+
           append({
             kind: "message",
             nick: message.nick,
@@ -141,7 +202,8 @@ function useChat(options: AppProps): Chat {
             body: message.body,
             ts: message.ts,
             own: false,
-          }),
+          });
+        },
         onPresence: setPresence,
         onConnectionChange: setConnection,
         onTrustEvent: (event) => {
@@ -156,7 +218,7 @@ function useChat(options: AppProps): Chat {
         },
         // Both of these are things the user will never get to read. Saying
         // nothing would leave them believing they had heard everything said.
-        onDecryptError: (error) => notice(`could not open a message: ${error.message}`),
+        onDecryptError: countUnopened,
         onDiscardedMessage: (discarded) => notice(discardNotice(discarded)),
         onRelayError: (code) => notice(`the relay rejected a message: ${code}`),
       })

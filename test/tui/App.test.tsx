@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { appendCapped, type TranscriptLine } from "../../src/tui/App.tsx";
 import { COMMANDS } from "../../src/tui/commands.ts";
 import { removeTempDirs, startTestRelay, wait, type TestRelay } from "../support/harness.ts";
 import {
   closeChats,
   joinAs,
+  joinWithWrongKey,
   mountChat,
   pressEnter,
   seeOnScreen,
@@ -106,6 +108,39 @@ describe("the chat screen", () => {
     expect(frame).toContain("the relay rejected a message");
   });
 
+  it("coalesces undecryptable frames into one notice carrying a count", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+    const mallory = await joinWithWrongKey("mallory", relay.url);
+
+    // Four, not more: the relay spends a token on `sub` as well as on each
+    // `msg`, and a fifth would trip the bucket and add notices of its own.
+    for (let sent = 0; sent < 4; sent++) await mallory.session.send(`noise ${sent}`);
+
+    const frame = await seeOnScreen(screen, "could not open 4 messages");
+
+    // Once on screen, not four times: the flood is what the count is for.
+    expect(frame.split("could not open")).toHaveLength(2);
+  });
+
+  it("starts a fresh count once a message opens again", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+    const bob = await joinAs("bob", relay.url);
+    const mallory = await joinWithWrongKey("mallory", relay.url);
+
+    for (let sent = 0; sent < 3; sent++) await mallory.session.send(`noise ${sent}`);
+    await seeOnScreen(screen, "could not open 3 messages");
+
+    await bob.session.send("still here");
+    await seeOnScreen(screen, "still here");
+
+    await mallory.session.send("noise again");
+    const frame = await seeOnScreen(screen, "could not open 1 message ");
+
+    // The earlier run stays where it was: the count belongs to the burst, not
+    // to the session.
+    expect(frame).toContain("could not open 3 messages");
+  });
+
   it("reports that nobody else is here until somebody is", async () => {
     const { screen } = await mountChat("alice", relay.url);
     expect(screen.captureCharFrame()).toContain("just you");
@@ -113,6 +148,30 @@ describe("the chat screen", () => {
     await joinAs("bob", relay.url);
     const frame = await seeOnScreen(screen, "2 here");
     expect(frame).not.toContain("just you");
+  });
+});
+
+/**
+ * The cap is tested against the pure function rather than through the screen:
+ * every inbound line has to cross the relay's five-frames-per-ten-seconds
+ * bucket, so two thousand of them is over an hour of wall clock.
+ */
+describe("a long session", () => {
+  const noticeLine = (id: string): TranscriptLine => ({
+    kind: "notice",
+    id,
+    text: `line ${id}`,
+    ts: 0,
+    tone: "info",
+  });
+
+  it("caps the transcript at 2000 lines and drops the oldest first", () => {
+    let lines: TranscriptLine[] = [];
+    for (let index = 0; index < 2001; index++) lines = appendCapped(lines, noticeLine(String(index)));
+
+    expect(lines).toHaveLength(2000);
+    expect(lines[0]!.id).toBe("1");
+    expect(lines.at(-1)!.id).toBe("2000");
   });
 });
 

@@ -73,7 +73,10 @@ describe("a hostile message body", () => {
     // the rest clears the screen and repaints it in their colours.
     await sendHostileBody("bob", `hi${ESC}]52;c;cGF3bmVk${BEL}${ESC}[2J${ESC}[31m`);
 
-    const frame = await seeOnScreen(screen, "could not open");
+    // The positive control: these assertions are all absences, and an absence
+    // passes against a blank frame. The rejection notice proves the frame
+    // arrived, was refused, and was said out loud.
+    const frame = await seeOnScreen(screen, "could not open 1 message");
 
     expect(frame).not.toContain(ESC);
     expect(frame).not.toContain(BEL);
@@ -84,7 +87,7 @@ describe("a hostile message body", () => {
 
     await sendHostileBody("bob", "ok\n00:00 ?alice  forged line");
 
-    const frame = await seeOnScreen(screen, "could not open");
+    const frame = await seeOnScreen(screen, "could not open 1 message");
 
     // Every line carries an Ed25519 signature, and a single newline would
     // otherwise put words on screen under somebody else's name.

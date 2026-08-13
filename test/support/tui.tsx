@@ -99,12 +99,30 @@ export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
  * Each call generates a fresh identity, so calling it twice under one nickname
  * is a device that reinstalled — or somebody else claiming the name.
  */
-export async function joinAs(nick: string, relayUrl: string): Promise<Peer> {
+export function joinAs(nick: string, relayUrl: string): Promise<Peer> {
+  return join(nick, relayUrl, CHANNEL_KEYS);
+}
+
+/**
+ * A peer whose frames route to this channel and cannot be opened in it: the
+ * handle matches, the message key does not. A handle travels in the clear, so
+ * this is what anybody who learns one can do without knowing the password.
+ */
+export function joinWithWrongKey(nick: string, relayUrl: string): Promise<Peer> {
+  const wrongKeys: ChannelKeys = {
+    handle: CHANNEL_KEYS.handle,
+    msgKey: crypto.getRandomValues(new Uint8Array(32)),
+  };
+
+  return join(nick, relayUrl, wrongKeys);
+}
+
+async function join(nick: string, relayUrl: string, keys: ChannelKeys): Promise<Peer> {
   const identity = loadOrCreateIdentity(tempDir(`id-${nick}`));
   const received: string[] = [];
 
   const session = await startSession({
-    keys: CHANNEL_KEYS,
+    keys,
     nick,
     identity,
     relayUrl,
