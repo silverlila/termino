@@ -5,8 +5,9 @@
  * body is not inert data: `ESC ] 52` writes to the reader's system clipboard,
  * `ESC [ 2J` clears their screen, and a single newline puts words on a line of
  * their own under whatever nickname the attacker chose. Every one of those is
- * a channel member attacking the other members' terminals, and the per-message
- * signature is no defence — the attacker signs it honestly.
+ * a channel member attacking the other members' terminals, and encryption is no
+ * defence — the attack arrives inside a message that opens perfectly, under a
+ * key the attacker legitimately holds.
  *
  * These functions report the problem rather than throwing, because their two
  * callers raise different errors: the protocol layer a `PayloadError`, the CLI

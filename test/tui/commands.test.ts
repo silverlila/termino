@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { COMMANDS, parseComposerInput, VERIFY_USAGE } from "../../src/tui/commands.ts";
+import { COMMANDS, parseComposerInput } from "../../src/tui/commands.ts";
 
 /**
  * The composer's grammar on its own, with no screen and no session: every
@@ -51,20 +51,19 @@ describe("/help", () => {
 });
 
 describe("/verify", () => {
-  it("takes the whole remainder of the line as the fingerprint", () => {
-    expect(parseComposerInput("/verify bob soul gospel lunar risk")).toEqual({
-      kind: "verify",
-      nick: "bob",
-      fingerprint: "soul gospel lunar risk",
-    });
+  it("is not a command any more", () => {
+    // There is no trust store to write to and no persistent key to verify: the
+    // session words are compared by two people looking at two screens, and
+    // they are different in the next session anyway.
+    const input = parseComposerInput("/verify bob acorn agent yoga");
+
+    expect(input.kind).toBe("unusable");
+    if (input.kind !== "unusable") throw new Error("unreachable");
+    expect(input.reason).toContain("unknown command");
   });
 
-  it("is unusable with no fingerprint", () => {
-    expect(parseComposerInput("/verify bob")).toEqual({ kind: "unusable", reason: VERIFY_USAGE });
-  });
-
-  it("is unusable with nothing at all", () => {
-    expect(parseComposerInput("/verify")).toEqual({ kind: "unusable", reason: VERIFY_USAGE });
+  it("is not in the command list", () => {
+    expect(COMMANDS.map((command) => command.usage)).toEqual(["/help", "/exit"]);
   });
 });
 

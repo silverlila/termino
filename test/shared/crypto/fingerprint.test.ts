@@ -1,16 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { fingerprint } from "../../../shared/crypto/fingerprint.ts";
+import { bytesFromWords, UnknownWordError, words } from "../../../shared/crypto/fingerprint.ts";
 import { WORDLIST } from "../../../shared/crypto/wordlist.ts";
-
-/** Recorded on first implementation. Pins both the byte-to-word mapping and
- * the order of the wordlist, either of which would silently change every
- * fingerprint users have already verified. */
-const VECTOR = {
-  publicKey: Uint8Array.from({ length: 32 }, (_, index) => index),
-  words: "hobby birch site daisy hundred satin double hundred",
-};
-
-const OTHER_KEY = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
 
 /** Computed independently of the wordlist's construction, so this test can
  * actually disagree with the list rather than restating it. */
@@ -68,27 +58,32 @@ describe("WORDLIST", () => {
   });
 });
 
-describe("fingerprint", () => {
-  test("produces the recorded known-answer words for a fixed public key", () => {
-    expect(fingerprint(VECTOR.publicKey)).toBe(VECTOR.words);
+describe("the byte-to-word codec", () => {
+  test("renders one space-joined word per byte", () => {
+    // Recorded literally rather than looked up in the wordlist, so this can
+    // disagree with the list instead of restating it.
+    expect(words(Uint8Array.from([0, 1, 255]))).toBe("acorn agent yoga");
   });
 
-  test("returns exactly 8 whitespace-separated tokens", () => {
-    expect(fingerprint(VECTOR.publicKey).split(/\s+/)).toHaveLength(8);
+  test("round-trips arbitrary bytes", () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+
+    expect(bytesFromWords(words(bytes))).toEqual(bytes);
   });
 
-  test("returns only words drawn from the wordlist, never hexadecimal", () => {
-    const tokens = fingerprint(OTHER_KEY).split(/\s+/);
-    const strangers = tokens.filter((token) => !WORDLIST.includes(token));
-
-    expect(strangers).toEqual([]);
+  test("decodes hyphen-separated words as well as spaces", () => {
+    expect(bytesFromWords("acorn-agent-yoga")).toEqual(Uint8Array.from([0, 1, 255]));
   });
 
-  test("two different public keys produce different fingerprints", () => {
-    expect(fingerprint(OTHER_KEY)).not.toBe(fingerprint(VECTOR.publicKey));
+  test("does not hash, so eight session words decode back to their eight bytes", () => {
+    const sas = Uint8Array.from([9, 8, 7, 6, 5, 4, 3, 2]);
+
+    expect(words(sas).split(" ")).toHaveLength(8);
+    expect(bytesFromWords(words(sas))).toEqual(sas);
   });
 
-  test("is deterministic for the same key", () => {
-    expect(fingerprint(VECTOR.publicKey)).toBe(fingerprint(VECTOR.publicKey));
+  test("throws naming the word that is not in the list", () => {
+    expect(() => bytesFromWords("acorn agent yoghurt")).toThrow(UnknownWordError);
+    expect(() => bytesFromWords("acorn agent yoghurt")).toThrow(/yoghurt/);
   });
 });

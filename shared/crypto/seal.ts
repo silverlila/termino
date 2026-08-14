@@ -1,15 +1,12 @@
 /** AES-GCM is used for the AEAD guarantee, not merely for confidentiality:
  * tampering with a sealed message must fail loudly rather than silently
  * producing altered plaintext. WebCrypto is built into Bun, so this costs no
- * dependency. */
-
-const NONCE_BYTES = 12;
-
-export interface Sealed {
-  /** Fresh per message. Reusing one under the same key breaks AES-GCM badly. */
-  nonce: Uint8Array;
-  ciphertext: Uint8Array;
-}
+ * dependency.
+ *
+ * The nonce is a parameter rather than something generated here. Every key this
+ * module is handed comes from the ratchet and is used for exactly one message,
+ * and its nonce is derived alongside it — so the same key and nonce arriving
+ * twice is a bug upstream, not something to paper over with fresh randomness. */
 
 /** Thrown when a message cannot be authenticated: wrong key, or tampering. */
 export class DecryptError extends Error {
@@ -29,16 +26,19 @@ function view(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(bytes);
 }
 
-async function importKey(msgKey: Uint8Array): Promise<CryptoKey> {
-  return await crypto.subtle.importKey("raw", view(msgKey), "AES-GCM", false, [
+async function importKey(messageKey: Uint8Array): Promise<CryptoKey> {
+  return await crypto.subtle.importKey("raw", view(messageKey), "AES-GCM", false, [
     "encrypt",
     "decrypt",
   ]);
 }
 
-export async function seal(msgKey: Uint8Array, plaintext: Uint8Array): Promise<Sealed> {
-  const key = await importKey(msgKey);
-  const nonce = crypto.getRandomValues(new Uint8Array(NONCE_BYTES));
+export async function seal(
+  messageKey: Uint8Array,
+  nonce: Uint8Array,
+  plaintext: Uint8Array,
+): Promise<Uint8Array> {
+  const key = await importKey(messageKey);
 
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: view(nonce) },
@@ -46,17 +46,17 @@ export async function seal(msgKey: Uint8Array, plaintext: Uint8Array): Promise<S
     view(plaintext),
   );
 
-  return { nonce, ciphertext: new Uint8Array(ciphertext) };
+  return new Uint8Array(ciphertext);
 }
 
 /** Throws DecryptError if the ciphertext does not authenticate. Never returns
  * altered plaintext. */
 export async function open(
-  msgKey: Uint8Array,
+  messageKey: Uint8Array,
   nonce: Uint8Array,
   ciphertext: Uint8Array,
 ): Promise<Uint8Array> {
-  const key = await importKey(msgKey);
+  const key = await importKey(messageKey);
 
   try {
     const plaintext = await crypto.subtle.decrypt(

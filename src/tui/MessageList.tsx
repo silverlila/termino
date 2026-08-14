@@ -8,20 +8,20 @@
  * below is not touched at all.
  */
 
-/** A message that arrived decrypted and signature-verified, or one we sent. */
+/** A message that arrived and opened under the receiving chain, or one we
+ * sent. Nothing else reaches this list. */
 export interface MessageEntry {
   kind: "message";
   id: string;
   nick: string;
   body: string;
-  /** Sender's timestamp, milliseconds since the epoch. Rendered as local time. */
+  /** When this client received it, milliseconds since the epoch. Rendered as
+   * local time. */
   ts: number;
-  /** Whether a human has confirmed this nickname's key out of band. */
-  verified: boolean;
 }
 
-/** `alarm` is for the one thing a user must not scroll past — a nickname whose
- * key has changed. Everything else the client says is `info`. */
+/** `alarm` is for the one thing a user must not scroll past — somebody else
+ * trying to join the conversation. Everything else the client says is `info`. */
 export type NoticeTone = "info" | "alarm";
 
 /** Something that happened to the connection rather than something a person
@@ -36,11 +36,6 @@ export interface NoticeEntry {
 }
 
 export type Entry = MessageEntry | NoticeEntry;
-
-/** `?` is a warning, not decoration: it means nobody has checked that this
- * nickname's key belongs to the person it claims. */
-export const UNVERIFIED_MARKER = "?";
-export const VERIFIED_MARKER = "✓";
 
 const TIME_COLUMN_WIDTH = 6;
 
@@ -87,11 +82,9 @@ function EntryRow({ entry }: { entry: Entry }) {
 }
 
 function MessageText({ entry }: { entry: MessageEntry }) {
-  const marker = entry.verified ? VERIFIED_MARKER : UNVERIFIED_MARKER;
-
   return (
     <text style={{ flexGrow: 1 }} wrapMode="word">
-      {`${marker}${entry.nick}  ${entry.body}`}
+      {`${entry.nick}  ${entry.body}`}
     </text>
   );
 }

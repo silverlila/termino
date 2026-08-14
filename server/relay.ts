@@ -4,9 +4,8 @@ import {
   errFrame,
   FrameError,
   isClientFrame,
-  presenceFrame,
+  type ClientFrame,
   type ErrorCode,
-  type MsgFrame,
   type SubFrame,
 } from "../shared/protocol/frame.ts";
 
@@ -32,6 +31,12 @@ export const RATE_LIMIT_WINDOW_MS = 10_000;
  * connections is free, so ten thousand of them cost an attacker nothing. */
 export const MAX_CONNECTIONS = 1000;
 export const MAX_CONNECTIONS_PER_IP = 10;
+
+/** A conversation is between exactly two people, so a third connection to a
+ * handle is refused. This is a convenience rather than a defence — the relay is
+ * the untrusted party, and nothing stops whoever runs it from lifting the cap.
+ * The defence is in the client, which accepts exactly one peer `hello`. */
+export const MAX_SUBSCRIBERS_PER_HANDLE = 2;
 
 /** Seconds — Bun's unit for this option, which it caps at 960. Bun's own
  * default is 120 today, so this changes no behaviour; it is stated so the time
@@ -138,10 +143,9 @@ export function startRelay(options: RelayOptions = {}) {
         if (frame === null) return reject(ws, "bad_frame");
 
         // Every frame the relay acts on costs a token, not just `msg`. A `sub`
-        // is cheap to send and expensive to serve: each accepted one announces
-        // presence to both the handle being left and the one being joined, so
-        // charging only `msg` left a client free to toggle between two handles
-        // and turn a small frame into a fan-out across every other member.
+        // is cheap to send and expensive to serve, so charging only `msg` left
+        // a client free to toggle between two handles and make the relay do
+        // subscription work for nothing.
         const limit = takeToken(ws.data.bucket, now());
         ws.data.bucket = limit.bucket;
         if (!limit.allowed) return reject(ws, "rate_limited");
@@ -152,10 +156,6 @@ export function startRelay(options: RelayOptions = {}) {
 
       close(ws) {
         release(ws.data.source);
-
-        // Bun has already removed this socket from the topic by the time close
-        // runs, so the count is the post-departure one the survivors want.
-        announcePresence(ws.data.handle);
       },
     },
   });
@@ -182,11 +182,11 @@ export function startRelay(options: RelayOptions = {}) {
     else openPerSource.delete(source);
   }
 
-  function parse(raw: string | Buffer): SubFrame | MsgFrame | null {
+  function parse(raw: string | Buffer): ClientFrame | null {
     try {
       const frame = decodeFrame(raw);
-      // `presence` and `err` are frames the relay originates. A client sending
-      // one is confused or probing; either way it is not something to act on.
+      // `err` is a frame the relay originates. A client sending one is confused
+      // or probing; either way it is not something to act on.
       return isClientFrame(frame) ? frame : null;
     } catch (error) {
       if (error instanceof FrameError) return null;
@@ -198,17 +198,24 @@ export function startRelay(options: RelayOptions = {}) {
     const previous = ws.data.handle;
     if (previous === frame.h) return;
 
-    if (previous !== null) {
-      ws.unsubscribe(previous);
-      announcePresence(previous);
+    if (server.subscriberCount(frame.h) >= MAX_SUBSCRIBERS_PER_HANDLE) {
+      return reject(ws, "channel_full");
     }
+
+    if (previous !== null) ws.unsubscribe(previous);
 
     ws.data.handle = frame.h;
     ws.subscribe(frame.h);
-    announcePresence(frame.h);
   }
 
-  function forward(ws: Bun.ServerWebSocket<Connection>, frame: MsgFrame, raw: string | Buffer): void {
+  /** `hello` and `msg` travel the same way. The relay is told nothing about
+   * what either means, and routes both by the handle the *connection*
+   * subscribed to rather than by the one inside the frame. */
+  function forward(
+    ws: Bun.ServerWebSocket<Connection>,
+    frame: ClientFrame,
+    raw: string | Buffer,
+  ): void {
     const handle = ws.data.handle;
     if (handle === null) return reject(ws, "not_subscribed");
     if (frame.h !== handle) return reject(ws, "bad_frame");
@@ -223,11 +230,6 @@ export function startRelay(options: RelayOptions = {}) {
    * error is about a sender's frame, not about the channel. */
   function reject(ws: Bun.ServerWebSocket<Connection>, code: ErrorCode): void {
     ws.send(encodeFrame(errFrame(code)));
-  }
-
-  function announcePresence(handle: string | null): void {
-    if (handle === null) return;
-    server.publish(handle, encodeFrame(presenceFrame(server.subscriberCount(handle))));
   }
 
   return server;

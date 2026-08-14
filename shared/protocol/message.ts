@@ -1,35 +1,59 @@
-import { ed25519 } from "@noble/curves/ed25519.js";
-import { hexToBytes } from "@noble/hashes/utils.js";
-import { PUBLIC_KEY_PATTERN } from "../crypto/identity.ts";
 import { pad, unpad } from "../crypto/pad.ts";
+import type { MessageKey } from "../crypto/ratchet.ts";
 import { open, seal } from "../crypto/seal.ts";
-import { fromBase64, msgFrame, toBase64, type MsgFrame } from "./frame.ts";
+import { fromBase64, msgFrame, type MsgFrame } from "./frame.ts";
 import { bodyProblem, nickProblem } from "./text.ts";
 
 /**
  * The inner payload: what actually gets encrypted, and what the relay never
- * sees. Signing happens *before* sealing, so the signature travels inside the
- * envelope — the relay cannot tell who wrote a message, only that one moved.
+ * sees.
+ *
+ * There is no signature and no sender key. The session key is pairwise between
+ * exactly two participants and each direction has its own chain, so a payload
+ * that opens under the receiving chain was written by the one other party who
+ * holds it — the AEAD tag is the authenticator. A per-message signature on top
+ * would need a persistent identity, which is the thing this protocol does not
+ * have.
+ *
+ * There is no timestamp either. Nothing trusted the sender's clock even when
+ * one was carried; the receiver's arrival time is the only clock it can vouch
+ * for.
  */
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 
-/** An Ed25519 signature, before base64. */
-const SIGNATURE_BYTES = 64;
+/** What a payload can be. An unrecognised type is rejected rather than
+ * ignored, exactly as an unknown frame version is. */
+const PAYLOAD_TYPES = ["text", "ping", "confirm"] as const;
+type PayloadType = (typeof PAYLOAD_TYPES)[number];
 
-export interface Payload {
-  /** The sender's Ed25519 public key, hex. Who the message claims to be from. */
-  from: string;
+/** Something a person said. */
+export interface TextPayload {
+  t: "text";
   nick: string;
   body: string;
-  /** Milliseconds since the epoch, set by the sender. Nothing trusts it. */
-  ts: number;
 }
 
-export interface SignedPayload extends Payload {
-  /** Base64 Ed25519 signature over `signedBytes(payload, handle)`. */
-  sig: string;
+/** Presence, asserted by the peer rather than by the relay: it opens under the
+ * receiving chain, so only the other participant can have sent it. */
+export interface PingPayload {
+  t: "ping";
+  nick: string;
 }
+
+/**
+ * The first payload either side sends, at counter 0 of its own chain. It is
+ * what proves the handshake reached the same keys on both ends — without it a
+ * mismatched secret produces silence, and silence is indistinguishable from
+ * nobody having typed anything yet. It is also where each side learns the
+ * peer's nickname.
+ */
+export interface ConfirmPayload {
+  t: "confirm";
+  nick: string;
+}
+
+export type Payload = TextPayload | PingPayload | ConfirmPayload;
 
 /** Thrown when a payload does not have the shape a payload must have. */
 export class PayloadError extends Error {
@@ -38,102 +62,63 @@ export class PayloadError extends Error {
   }
 }
 
-/** Thrown when a payload is well-formed but its signature does not verify
- * against the key it claims to be from. The message is discarded. */
-export class SignatureError extends Error {
-  constructor() {
-    super("message signature did not verify");
-  }
-}
-
 /**
- * The exact bytes that are signed and verified.
+ * Why this payload cannot be sent, or `null` if it can.
  *
- * An array, not the object: JSON object key order is an implementation detail
- * of whoever built the object, so signing `JSON.stringify(payload)` would make
- * a signature that verifies on the sender's machine and fails on the
- * recipient's. Positional order here is part of the wire contract — reordering
- * these five values invalidates every signature ever produced.
- *
- * The handle leads, and it is signed without being carried inside the payload:
- * the recipient already has it on the outer frame. Signing it is what stops a
- * member of two channels from lifting a message out of one and re-sealing it
- * into the other, where it would otherwise verify as genuinely from its author.
- * Encrypting the handle instead would not help — the attacker seals the copy
- * themselves, so they would simply seal it under the second handle.
+ * Separate from `sealMessage` because a sender must find out *before* it spends
+ * a counter on the message: the counter cannot be handed back, and a burnt one
+ * arrives at the far end as a gap in the conversation.
  */
-export function signedBytes(payload: Payload, handle: string): Uint8Array {
-  return utf8(JSON.stringify([handle, payload.from, payload.nick, payload.body, payload.ts]));
-}
+export function payloadProblem(payload: Payload): string | null {
+  const problem = nickProblem(payload.nick);
+  if (problem !== null) return problem;
 
-export function sign(payload: Payload, handle: string, secretKey: Uint8Array): SignedPayload {
-  const signature = ed25519.sign(signedBytes(payload, handle), secretKey);
-  return { ...payload, sig: toBase64(signature) };
+  if (payload.t !== "text") return null;
+
+  return bodyProblem(payload.body);
 }
 
 /**
- * Checks a payload against the public key it names in `from`, for the channel
- * it arrived in. That proves the body was not altered, that whoever sent it
- * holds that key, and that they wrote it for this channel; whether that key
- * belongs to the person the `nick` claims is a separate question, answered by
- * the trust store.
- */
-export function verify(signed: SignedPayload, handle: string): boolean {
-  try {
-    const signature = fromBase64(signed.sig);
-    const publicKey = hexToBytes(signed.from);
-    return ed25519.verify(signature, signedBytes(signed, handle), publicKey);
-  } catch {
-    // A malformed signature or key is a failed verification, not a crash.
-    return false;
-  }
-}
-
-/**
- * Signs, then pads, then encrypts, then wraps in the outer frame — in that
- * order.
+ * Pads, then encrypts, then wraps in the outer frame — in that order.
  *
  * The text rules are applied here as well as on arrival, so this client cannot
- * be the one sending a body that every honest recipient will refuse. Refusing
- * rather than trimming: the signature covers the exact bytes, so a body quietly
- * rewritten on the way out is one the sender never wrote.
+ * be the one sending a body that every honest recipient will refuse.
  *
  * Padding wraps the serialised payload rather than the body, because the body
  * is not what the relay measures — the sealed JSON is. `seal` itself stays
  * generic and knows nothing about any of this.
  */
-export async function sealMessage(input: {
-  msgKey: Uint8Array;
-  handle: string;
-  payload: Payload;
-  secretKey: Uint8Array;
-}): Promise<MsgFrame> {
-  const problem = nickProblem(input.payload.nick) ?? bodyProblem(input.payload.body);
+export async function sealMessage(
+  messageKey: MessageKey,
+  handle: string,
+  counter: number,
+  payload: Payload,
+): Promise<MsgFrame> {
+  const problem = payloadProblem(payload);
   if (problem !== null) throw new PayloadError(problem);
 
-  const signed = sign(input.payload, input.handle, input.secretKey);
-  const { nonce, ciphertext } = await seal(input.msgKey, pad(utf8(JSON.stringify(signed))));
-  return msgFrame(input.handle, nonce, ciphertext);
+  const ciphertext = await seal(
+    messageKey.key,
+    messageKey.nonce,
+    pad(utf8(JSON.stringify(payload))),
+  );
+
+  return msgFrame(handle, counter, ciphertext);
 }
 
 /**
- * Decrypts and verifies an inbound frame. Throws `DecryptError` if the
+ * Decrypts and validates one inbound frame. Throws `DecryptError` if the
  * ciphertext does not authenticate, `PaddingError` if what it decrypts to is
- * not padded the way this protocol pads, `PayloadError` if it decrypts to
- * something that is not a payload, and `SignatureError` if the signature does
- * not match the key it claims, or was made for a different channel. Only a
- * fully verified payload is ever returned.
+ * not padded the way this protocol pads, and `PayloadError` if it decrypts to
+ * something that is not a payload. Only a fully validated payload is returned.
  */
-export async function openMessage(msgKey: Uint8Array, frame: MsgFrame): Promise<SignedPayload> {
-  const plaintext = await open(msgKey, fromBase64(frame.n), fromBase64(frame.c));
-  const signed = parsePayload(new TextDecoder().decode(unpad(plaintext)));
+export async function openMessage(messageKey: MessageKey, frame: MsgFrame): Promise<Payload> {
+  const plaintext = await open(messageKey.key, messageKey.nonce, fromBase64(frame.c));
 
-  if (!verify(signed, frame.h)) throw new SignatureError();
-
-  return signed;
+  return parsePayload(new TextDecoder().decode(unpad(plaintext)));
 }
 
-function parsePayload(text: string): SignedPayload {
+function parsePayload(text: string): Payload {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -146,49 +131,25 @@ function parsePayload(text: string): SignedPayload {
   }
 
   const fields = parsed as Record<string, unknown>;
+  const type = readType(fields.t);
+  const nick = readText(fields.nick, "nick", nickProblem);
 
-  return {
-    from: readPublicKey(fields.from),
-    nick: readText(fields.nick, "nick", nickProblem),
-    body: readText(fields.body, "body", bodyProblem),
-    ts: readTimestamp(fields.ts),
-    sig: readSignature(fields.sig),
-  };
-}
-
-function readPublicKey(value: unknown): string {
-  if (typeof value !== "string" || !PUBLIC_KEY_PATTERN.test(value)) {
-    throw new PayloadError("from is not a 64-character hex public key");
-  }
-  return value;
-}
-
-/**
- * Checks the length, and re-emits the signature in one canonical spelling.
- *
- * A recipient tells two copies of one message apart by comparing signatures,
- * and base64 spells the same bytes more than one way — the padding can be
- * dropped and it still decodes identically. Somebody in the channel could
- * otherwise re-seal a message somebody else signed, respelt, and have it
- * arrive as something newly said. Every comparison downstream is a comparison
- * of the bytes, because the string is derived from them here.
- */
-function readSignature(value: unknown): string {
-  if (typeof value !== "string") throw new PayloadError("sig is not a string");
-
-  let signature: Uint8Array;
-  try {
-    signature = fromBase64(value);
-  } catch {
-    // Raised as a payload problem, not a frame one: this is what the envelope
-    // decrypted to, and the frame around it was perfectly well formed.
-    throw new PayloadError("sig is not valid base64");
+  // Rebuilt field by field rather than spread from what arrived: anything the
+  // sender added — a `from`, a `ts`, a field a later version invents — stops
+  // here rather than travelling on into the client as if this layer had
+  // checked it.
+  if (type !== "text") {
+    if ("body" in fields) throw new PayloadError(`a ${type} payload carries no body`);
+    return { t: type, nick };
   }
 
-  if (signature.length !== SIGNATURE_BYTES)
-    throw new PayloadError(`sig is not ${SIGNATURE_BYTES} bytes`);
+  return { t: "text", nick, body: readText(fields.body, "body", bodyProblem) };
+}
 
-  return toBase64(signature);
+function readType(value: unknown): PayloadType {
+  const known = PAYLOAD_TYPES.find((type) => type === value);
+  if (known === undefined) throw new PayloadError(`unknown payload type ${JSON.stringify(value)}`);
+  return known;
 }
 
 /**
@@ -205,12 +166,5 @@ function readText(
   const problem = problemOf(value);
   if (problem !== null) throw new PayloadError(problem);
 
-  return value;
-}
-
-function readTimestamp(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new PayloadError("ts is not an integer");
-  }
   return value;
 }

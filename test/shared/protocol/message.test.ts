@@ -1,375 +1,208 @@
 import { describe, expect, it } from "bun:test";
-import { ed25519 } from "@noble/curves/ed25519.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
-import { pad, unpad } from "../../../shared/crypto/pad.ts";
-import { DecryptError, open, seal } from "../../../shared/crypto/seal.ts";
+import { BUCKETS, pad, PaddingError } from "../../../shared/crypto/pad.ts";
+import type { MessageKey } from "../../../shared/crypto/ratchet.ts";
+import { DecryptError, seal } from "../../../shared/crypto/seal.ts";
 import { fromBase64, msgFrame } from "../../../shared/protocol/frame.ts";
+import { MAX_BODY_BYTES } from "../../../shared/protocol/text.ts";
 import {
   openMessage,
+  payloadProblem,
   PayloadError,
   sealMessage,
-  sign,
-  signedBytes,
-  SignatureError,
-  verify,
   type Payload,
-  type SignedPayload,
 } from "../../../shared/protocol/message.ts";
 
-const HANDLE = "63402012e8d78d978a4ab491cf2e5ae9";
-const OTHER_HANDLE = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
-const MSG_KEY = new Uint8Array(32).fill(11);
-const OTHER_MSG_KEY = new Uint8Array(32).fill(22);
-
-const SECRET_KEY = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
-const PUBLIC_KEY_HEX = bytesToHex(ed25519.getPublicKey(SECRET_KEY));
-
-const OTHER_SECRET_KEY = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
-
 /**
- * The bytes a client actually seals: the serialised payload, padded to a size
- * bucket. Spelt out here because the cases below deliberately bypass
- * `sealMessage` — a frame built without the padding layer is not one this
- * protocol could have produced.
+ * The inner payload: the part the relay never sees. Everything here is about
+ * shape and rules — that a `text`, a `ping` and a `confirm` survive the round
+ * trip, that nothing else does, and that a hostile body cannot get through in
+ * either direction.
  */
-function plaintextOf(value: unknown): Uint8Array {
-  return pad(new TextEncoder().encode(JSON.stringify(value)));
+
+const HANDLE = "63402012e8d78d978a4ab491cf2e5ae9";
+
+const KEY: MessageKey = {
+  key: new Uint8Array(32).fill(11),
+  nonce: Uint8Array.from({ length: 12 }, (_, index) => index),
+};
+
+const OTHER_KEY: MessageKey = {
+  key: new Uint8Array(32).fill(22),
+  nonce: KEY.nonce,
+};
+
+const utf8 = (text: string) => new TextEncoder().encode(text);
+
+/** Written as escapes rather than the raw bytes: a literal ESC or zero-width
+ * space in a source file is invisible to every reader and one careless copy
+ * away from being lost. */
+const ESC = "\u001B";
+const ZERO_WIDTH_SPACE = "\u200B";
+
+const TEXT: Payload = { t: "text", nick: "alice", body: "shipping it now" };
+
+/** A frame built without going through `sealMessage`, so the cases below can
+ * put on the wire what an honest client refuses to send. */
+async function frameOf(value: unknown, key = KEY) {
+  const ciphertext = await seal(key.key, key.nonce, pad(utf8(JSON.stringify(value))));
+  return msgFrame(HANDLE, 0, ciphertext);
 }
 
-function payloadFrom(overrides: Partial<Payload> = {}): Payload {
-  return {
-    from: PUBLIC_KEY_HEX,
-    nick: "alice",
-    body: "shipping it now",
-    ts: 1786531200000,
-    ...overrides,
-  };
-}
-
-describe("signed bytes", () => {
-  // Written out by hand rather than derived from the payload, so this test can
-  // disagree with the implementation instead of restating it. Changing this
-  // string invalidates every signature Termino has ever produced.
-  const FIXED_PAYLOAD: Payload = {
-    from: "0123456789abcdef".repeat(4),
-    nick: "alice",
-    body: "shipping it now",
-    ts: 1786531200000,
-  };
-  const EXPECTED_JSON =
-    '["63402012e8d78d978a4ab491cf2e5ae9",' +
-    '"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",' +
-    '"alice","shipping it now",1786531200000]';
-
-  it("signs the array form recorded in the wire format", () => {
-    expect(new TextDecoder().decode(signedBytes(FIXED_PAYLOAD, HANDLE))).toBe(EXPECTED_JSON);
+describe("the three payload types", () => {
+  it("round-trips a text payload", async () => {
+    expect(await openMessage(KEY, await sealMessage(KEY, HANDLE, 0, TEXT))).toEqual(TEXT);
   });
 
-  it("covers the channel handle, so a signature does not travel between channels", () => {
-    expect(signedBytes(FIXED_PAYLOAD, HANDLE)).not.toEqual(
-      signedBytes(FIXED_PAYLOAD, OTHER_HANDLE),
-    );
+  it("round-trips a ping payload", async () => {
+    const ping: Payload = { t: "ping", nick: "alice" };
+
+    expect(await openMessage(KEY, await sealMessage(KEY, HANDLE, 3, ping))).toEqual(ping);
   });
 
-  it("does not depend on the key order of the payload object", () => {
-    const reordered: Payload = {
-      ts: FIXED_PAYLOAD.ts,
-      body: FIXED_PAYLOAD.body,
-      nick: FIXED_PAYLOAD.nick,
-      from: FIXED_PAYLOAD.from,
-    };
-    expect(signedBytes(reordered, HANDLE)).toEqual(signedBytes(FIXED_PAYLOAD, HANDLE));
+  it("round-trips a confirm payload", async () => {
+    const confirm: Payload = { t: "confirm", nick: "alice" };
+
+    expect(await openMessage(KEY, await sealMessage(KEY, HANDLE, 0, confirm))).toEqual(confirm);
+  });
+
+  it("puts the counter it was given on the frame", async () => {
+    expect((await sealMessage(KEY, HANDLE, 42, TEXT)).i).toBe(42);
   });
 });
 
-describe("signing and verifying", () => {
-  it("verifies a payload it just signed", () => {
-    expect(verify(sign(payloadFrom(), HANDLE, SECRET_KEY), HANDLE)).toBe(true);
+describe("a payload type that is not one of the three", () => {
+  it("is rejected rather than ignored", async () => {
+    const frame = await frameOf({ t: "shutdown", nick: "alice" });
+
+    await expect(openMessage(KEY, frame)).rejects.toBeInstanceOf(PayloadError);
+    await expect(openMessage(KEY, frame)).rejects.toThrow(/unknown payload type/);
   });
 
-  it("rejects a payload whose body was modified after signing", () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    const tampered: SignedPayload = { ...signed, body: "cancel the deploy" };
-
-    expect(verify(tampered, HANDLE)).toBe(false);
-  });
-
-  it("rejects a payload whose nick was modified after signing", () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    expect(verify({ ...signed, nick: "bob" }, HANDLE)).toBe(false);
-  });
-
-  it("rejects a payload whose timestamp was modified after signing", () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    expect(verify({ ...signed, ts: signed.ts + 1 }, HANDLE)).toBe(false);
-  });
-
-  it("rejects a payload presented as belonging to a different channel", () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    expect(verify(signed, OTHER_HANDLE)).toBe(false);
-  });
-
-  it("rejects a signature made by a different key than the one claimed", () => {
-    const impostor = sign(payloadFrom(), HANDLE, OTHER_SECRET_KEY);
-    // `from` still names the honest key, so this is an impersonation attempt.
-    expect(verify(impostor, HANDLE)).toBe(false);
-  });
-
-  it("still verifies when the payload object is rebuilt in a different key order", () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    const reordered: SignedPayload = {
-      sig: signed.sig,
-      ts: signed.ts,
-      body: signed.body,
-      nick: signed.nick,
-      from: signed.from,
-    };
-
-    expect(verify(reordered, HANDLE)).toBe(true);
-  });
-
-  it("treats a malformed signature as unverified rather than throwing", () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    expect(verify({ ...signed, sig: "!!!not base64!!!" }, HANDLE)).toBe(false);
-    expect(verify({ ...signed, sig: "" }, HANDLE)).toBe(false);
-  });
-});
-
-describe("sealing and opening", () => {
-  it("round-trips a message through the wire format", async () => {
-    const frame = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom(),
-      secretKey: SECRET_KEY,
-    });
-
-    const opened = await openMessage(MSG_KEY, frame);
-
-    expect(opened.body).toBe("shipping it now");
-    expect(opened.nick).toBe("alice");
-    expect(opened.from).toBe(PUBLIC_KEY_HEX);
-  });
-
-  it("fails to open with the wrong channel key", async () => {
-    const frame = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom(),
-      secretKey: SECRET_KEY,
-    });
-
-    await expect(openMessage(OTHER_MSG_KEY, frame)).rejects.toBeInstanceOf(DecryptError);
-  });
-
-  it("rejects a message signed by a key other than the one it claims", async () => {
-    // Someone inside the channel — they hold msgKey — forging a message from
-    // alice. The channel password authenticates nobody; the device key does.
-    const forged = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom({ nick: "alice" }),
-      secretKey: OTHER_SECRET_KEY,
-    });
-
-    await expect(openMessage(MSG_KEY, forged)).rejects.toBeInstanceOf(SignatureError);
-  });
-
-  it("hands back one spelling of a signature, whatever spelling arrived", async () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    // The same 64 bytes with the base64 padding dropped: a different string
-    // that decodes identically, and still verifies.
-    const respelt = { ...signed, sig: signed.sig.replace(/=+$/, "") };
-    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf(respelt));
-
-    const opened = await openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext));
-
-    // A recipient remembers the signatures it has already shown, so two
-    // spellings of one signature must not read as two different messages.
-    expect(opened.sig).toBe(signed.sig);
-  });
-
-  it("rejects a signature that is not the length of one", async () => {
-    const signed = sign(payloadFrom(), HANDLE, SECRET_KEY);
-    const truncated = { ...signed, sig: signed.sig.slice(0, 20) };
-    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf(truncated));
-
-    await expect(openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext))).rejects.toBeInstanceOf(
-      PayloadError,
-    );
-  });
-
-  it("rejects ciphertext that decrypts to something that is not a payload", async () => {
-    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf({ hello: "world" }));
-
-    await expect(openMessage(MSG_KEY, msgFrame(HANDLE, nonce, ciphertext))).rejects.toBeInstanceOf(
+  it("is rejected when the type is missing entirely", async () => {
+    await expect(openMessage(KEY, await frameOf({ nick: "alice", body: "hi" }))).rejects.toThrow(
       PayloadError,
     );
   });
 });
 
-describe("hostile text", () => {
-  /** A frame built from the primitives rather than `sealMessage`, which is
-   * itself one of the things under test here: this is what a patched client,
-   * or somebody speaking the protocol by hand, would put on the wire. */
-  async function sealWithoutChecking(payload: Payload) {
-    const signed = sign(payload, HANDLE, SECRET_KEY);
-    const { nonce, ciphertext } = await seal(MSG_KEY, plaintextOf(signed));
-    return msgFrame(HANDLE, nonce, ciphertext);
-  }
-
-  it("rejects a body containing an escape sequence", async () => {
-    // OSC 52: a channel member writing to the reader's system clipboard.
-    const frame = await sealWithoutChecking(
-      payloadFrom({ body: "hi\u001B]52;c;cGF3bmVk\u0007" }),
-    );
-
-    await expect(openMessage(MSG_KEY, frame)).rejects.toBeInstanceOf(PayloadError);
-  });
-
-  it("rejects a body containing a newline", async () => {
-    const frame = await sealWithoutChecking(
-      payloadFrom({ body: "ok\n00:00 ?alice  forged line" }),
-    );
-
-    await expect(openMessage(MSG_KEY, frame)).rejects.toBeInstanceOf(PayloadError);
-  });
-
-  it("rejects a nick containing a control character", async () => {
-    const frame = await sealWithoutChecking(payloadFrom({ nick: "bob\u001B[31m" }));
-
-    await expect(openMessage(MSG_KEY, frame)).rejects.toBeInstanceOf(PayloadError);
-  });
-
-  it("refuses to seal a body that would be rejected on arrival", async () => {
-    // Both directions read one rule, so this client cannot be the one putting
-    // a body on the wire that every honest recipient will refuse.
-    const input = {
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom({ body: "hi\u001B[2J" }),
-      secretKey: SECRET_KEY,
+describe("the fields version 1 carried", () => {
+  it("no longer parses a signed v1 payload at all, because it has no type", async () => {
+    const v1 = {
+      from: "00".repeat(32),
+      nick: "alice",
+      body: "shipping it now",
+      ts: 1786531200000,
+      sig: "A".repeat(88),
     };
 
-    await expect(sealMessage(input)).rejects.toBeInstanceOf(PayloadError);
+    await expect(openMessage(KEY, await frameOf(v1))).rejects.toBeInstanceOf(PayloadError);
   });
 
-  it("refuses to seal an over-long body", async () => {
-    const input = {
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom({ body: "a".repeat(1901) }),
-      secretKey: SECRET_KEY,
-    };
+  it("drops a from and a ts that arrive alongside a valid payload", async () => {
+    const frame = await frameOf({ ...TEXT, from: "00".repeat(32), ts: 1786531200000 });
 
-    await expect(sealMessage(input)).rejects.toBeInstanceOf(PayloadError);
+    // Rebuilt field by field on the way in, so nothing the sender invented
+    // travels on as if this layer had checked it.
+    expect(await openMessage(KEY, frame)).toEqual(TEXT);
   });
 
-  it("still seals ordinary non-ASCII text", async () => {
-    const frame = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom({ nick: "zoë", body: "déjà vu — shipping it now 🚀" }),
-      secretKey: SECRET_KEY,
-    });
+  it("does not put a ts on what it sends", async () => {
+    const opened = await openMessage(KEY, await sealMessage(KEY, HANDLE, 0, TEXT));
 
-    expect((await openMessage(MSG_KEY, frame)).body).toBe("déjà vu — shipping it now 🚀");
+    expect(Object.keys(opened).sort()).toEqual(["body", "nick", "t"]);
+  });
+});
+
+describe("what cannot be sent", () => {
+  it("refuses a body carrying a control character", () => {
+    const problem = payloadProblem({ t: "text", nick: "alice", body: `hi${ESC}[2J` });
+
+    expect(problem).toContain("U+001B");
+  });
+
+  it("refuses a nickname carrying a control character", () => {
+    expect(payloadProblem({ t: "ping", nick: `al${ESC}ice` })).toContain("U+001B");
+  });
+
+  it("refuses an over-long body", () => {
+    const problem = payloadProblem({ t: "text", nick: "alice", body: "a".repeat(MAX_BODY_BYTES + 1) });
+
+    expect(problem).toContain("over the limit");
+  });
+
+  it("accepts an ordinary text payload", () => {
+    expect(payloadProblem(TEXT)).toBeNull();
+  });
+
+  it("throws rather than sealing a payload it would refuse", async () => {
+    const hostile: Payload = { t: "text", nick: "alice", body: `hi${ESC}]52;c;cGF3bmVk` };
+
+    await expect(sealMessage(KEY, HANDLE, 0, hostile)).rejects.toBeInstanceOf(PayloadError);
+  });
+});
+
+describe("what cannot be received", () => {
+  it("refuses a body carrying a control character, however it was sealed", async () => {
+    const frame = await frameOf({ t: "text", nick: "bob", body: "ok\n00:00 alice  forged" });
+
+    await expect(openMessage(KEY, frame)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("refuses a nickname carrying a zero-width character", async () => {
+    const frame = await frameOf({ t: "text", nick: `al${ZERO_WIDTH_SPACE}ice`, body: "hi" });
+
+    await expect(openMessage(KEY, frame)).rejects.toBeInstanceOf(PayloadError);
+  });
+
+  it("refuses a body on a payload that has no business carrying one", async () => {
+    const frame = await frameOf({ t: "ping", nick: "alice", body: "smuggled" });
+
+    await expect(openMessage(KEY, frame)).rejects.toThrow(/carries no body/);
+  });
+
+  it("refuses a text payload with no body", async () => {
+    await expect(openMessage(KEY, await frameOf({ t: "text", nick: "alice" }))).rejects.toThrow(
+      PayloadError,
+    );
+  });
+
+  it("refuses something that is not JSON at all", async () => {
+    const ciphertext = await seal(KEY.key, KEY.nonce, pad(utf8("not json")));
+
+    await expect(openMessage(KEY, msgFrame(HANDLE, 0, ciphertext))).rejects.toThrow(PayloadError);
+  });
+
+  it("refuses a plaintext that was never padded", async () => {
+    const ciphertext = await seal(KEY.key, KEY.nonce, utf8(JSON.stringify(TEXT)));
+
+    await expect(openMessage(KEY, msgFrame(HANDLE, 0, ciphertext))).rejects.toBeInstanceOf(
+      PaddingError,
+    );
+  });
+
+  it("refuses a frame sealed under another key", async () => {
+    await expect(openMessage(KEY, await frameOf(TEXT, OTHER_KEY))).rejects.toBeInstanceOf(
+      DecryptError,
+    );
   });
 });
 
 describe("padding", () => {
-  async function sealedBytes(body: string): Promise<number> {
-    const frame = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom({ body }),
-      secretKey: SECRET_KEY,
-    });
-    return fromBase64(frame.c).length;
-  }
-
-  it("hides the length of two bodies three hundred bytes apart", async () => {
-    // AES-GCM ciphertext is the plaintext length plus a 16-byte tag, so
-    // without padding the relay would read the size of every message off the
-    // wire without decrypting anything. Both of these land in one bucket.
-    expect(await sealedBytes("a".repeat(400))).toBe(await sealedBytes("a".repeat(700)));
-  });
-
-  it("hides the length of the short messages people actually send", async () => {
-    // The case the module exists for: the difference between "a message
-    // moved" and "they typed yes".
-    expect(await sealedBytes("yes")).toBe(await sealedBytes("on my way, five minutes"));
-  });
-
-  it("still tells a short message from a long one across buckets", async () => {
-    // Five buckets, so the leak is a bucket rather than a byte — not nothing,
-    // and this records which half of the trade is being made.
-    expect(await sealedBytes("yes")).toBeLessThan(await sealedBytes("a".repeat(1900)));
-  });
-});
-
-describe("cross-channel replay", () => {
-  it("refuses a message lifted out of one channel and re-sealed into another", async () => {
-    // Mallory belongs to both channels, so she legitimately holds both message
-    // keys. Alice posts only in the first one.
-    const inChannelA = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom(),
-      secretKey: SECRET_KEY,
+  it("hides the length of what was said", async () => {
+    const short = await sealMessage(KEY, HANDLE, 0, TEXT);
+    const long = await sealMessage(KEY, HANDLE, 0, {
+      t: "text",
+      nick: "alice",
+      body: "a".repeat(120),
     });
 
-    // Mallory opens it with the key she is entitled to, takes the inner signed
-    // payload untouched — she cannot forge Alice's signature, so she does not
-    // try — and seals that exact payload into her other channel.
-    const plaintext = await open(MSG_KEY, fromBase64(inChannelA.n), fromBase64(inChannelA.c));
-    const { nonce, ciphertext } = await seal(OTHER_MSG_KEY, plaintext);
-    const inChannelB = msgFrame(OTHER_HANDLE, nonce, ciphertext);
-
-    // Bob is in the second channel and holds its key, so the envelope opens.
-    // The signature is what stops him from reading it as a message Alice wrote
-    // to a channel she never joined.
-    await expect(openMessage(OTHER_MSG_KEY, inChannelB)).rejects.toBeInstanceOf(SignatureError);
-  });
-});
-
-describe("sign-before-encrypt ordering", () => {
-  it("keeps the signature inside the envelope, invisible to the relay", async () => {
-    const frame = await sealMessage({
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom(),
-      secretKey: SECRET_KEY,
-    });
-
-    // What the relay sees: a routing label and an opaque blob. No signature,
-    // no nickname, no public key.
-    expect(Object.keys(frame).sort()).toEqual(["c", "h", "n", "t", "v"]);
-    expect(frame).not.toHaveProperty("sig");
-    expect(JSON.stringify(frame)).not.toContain(PUBLIC_KEY_HEX);
-    expect(JSON.stringify(frame)).not.toContain("alice");
-
-    // What is actually inside it: the signature, sealed along with everything
-    // it covers. This is what makes the ordering a demonstrated fact.
-    const plaintext = await open(MSG_KEY, fromBase64(frame.n), fromBase64(frame.c));
-    const inner = JSON.parse(new TextDecoder().decode(unpad(plaintext)));
-
-    expect(inner).toHaveProperty("sig");
-    expect(inner.from).toBe(PUBLIC_KEY_HEX);
-    expect(inner.nick).toBe("alice");
+    expect(fromBase64(short.c).length).toBe(fromBase64(long.c).length);
   });
 
-  it("produces a different frame each time the same message is sealed", async () => {
-    const input = {
-      msgKey: MSG_KEY,
-      handle: HANDLE,
-      payload: payloadFrom(),
-      secretKey: SECRET_KEY,
-    };
-    const first = await sealMessage(input);
-    const second = await sealMessage(input);
+  it("seals a bucket-sized plaintext, so the relay reads one of five lengths", async () => {
+    const sealed = await sealMessage(KEY, HANDLE, 0, TEXT);
+    const tagBytes = 16;
 
-    expect(first.n).not.toBe(second.n);
-    expect(first.c).not.toBe(second.c);
+    expect(BUCKETS).toContain(fromBase64(sealed.c).length - tagBytes);
   });
 });
