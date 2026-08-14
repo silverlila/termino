@@ -547,11 +547,13 @@ describe("a third party", () => {
  * choice of one exact frame rather than of whichever frame happened to be
  * third through the pipe.
  */
-function droppingMeddler(counter: number): Meddler {
+function droppingMeddler(...counters: number[]): Meddler {
+  const dropped = new Set(counters);
+
   return startMeddler(relay.port, {
     toClient(raw, deliver) {
       const frame = decodeFrame(raw);
-      if (frame.t === "msg" && frame.i === counter) return;
+      if (frame.t === "msg" && dropped.has(frame.i)) return;
 
       deliver(raw);
     },
@@ -583,6 +585,35 @@ describe("a gap in the numbering", () => {
 
       expect(bob.got.gaps).toEqual([{ nick: "alice", count: 1 }]);
       expect(bob.got.messages.map((message) => message.body)).toEqual(["one", "three", "four"]);
+    } finally {
+      meddler.stop();
+    }
+  });
+
+  it("counts every message in the gap, not just the fact of one", async () => {
+    // Two consecutive numbers go missing rather than one. Without this the
+    // whole `gap` filter only ever sees a count of 1, so a reporter that
+    // hardcoded 1 — or counted gaps instead of messages — would pass.
+    const meddler = droppingMeddler(2, 3);
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      await alice.session.send("one");
+      await until(() => bob.got.messages.length === 1);
+      await alice.session.send("two");
+      await alice.session.send("three");
+      await alice.session.send("four");
+      await until(() => bob.got.messages.length === 2);
+      await settle();
+
+      expect(bob.got.gaps).toEqual([]);
+
+      await alice.session.send("five");
+      await until(() => bob.got.gaps.length === 1);
+
+      expect(bob.got.gaps).toEqual([{ nick: "alice", count: 2 }]);
+      expect(bob.got.messages.map((message) => message.body)).toEqual(["one", "four", "five"]);
     } finally {
       meddler.stop();
     }
