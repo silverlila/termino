@@ -3,8 +3,10 @@ import { generatePsk } from "../shared/crypto/psk.ts";
 import { formatInvite, parseInvite } from "../shared/protocol/invite.ts";
 import {
   checkPromptedNick,
+  inviteRelayUrl,
   loadRenderer,
   parseArgs,
+  SCROLLBACK_WARNING,
   UsageError,
   type JoinCommand,
   type NewCommand,
@@ -123,6 +125,31 @@ describe("the invite an invite-shaped argument has to be", () => {
   });
 });
 
+describe("the relay an invite is dialled on", () => {
+  it("dials a remote host over wss", () => {
+    // The token carries no scheme, so this is the only safe reading of one.
+    expect(inviteRelayUrl("wss://relay.example:8787/")).toBe("wss://relay.example:8787/");
+  });
+
+  it("dials a loopback host over ws, which is the only thing there is to dial", () => {
+    // Nothing issues a certificate for localhost, so reading a loopback invite
+    // as wss:// would make `new --relay ws://localhost:8787` mint an invite
+    // that cannot be redeemed on the machine that minted it.
+    expect(inviteRelayUrl("wss://localhost:8787/")).toBe("ws://localhost:8787/");
+    expect(inviteRelayUrl("wss://127.0.0.1:8787/")).toBe("ws://127.0.0.1:8787/");
+    expect(inviteRelayUrl("wss://[::1]:8787/")).toBe("ws://[::1]:8787/");
+  });
+
+  it("is what `new` and `join` agree on for a localhost relay", () => {
+    // The whole loop, which is the one a person runs first: a relay on
+    // localhost, an invite minted against it, and the URL the far side dials.
+    const relay = asNew(["new", "--relay", "ws://localhost:8787"]).relay;
+    const invite = formatInvite(generatePsk(), relay);
+
+    expect(inviteRelayUrl(parseInvite(invite).relay)).toBe("ws://localhost:8787/");
+  });
+});
+
 describe("relay url", () => {
   const relayOf = (argv: string[]) => asNew(["new", ...argv]).relay;
 
@@ -163,6 +190,60 @@ describe("relay url", () => {
     expect(() => relayOf(["--relay", "http://relay.example"])).toThrow(UsageError);
     expect(() => relayOf(["--relay", "http://relay.example"])).toThrow(/ws:\/\/ or wss:\/\//);
     expect(() => relayOf(["--relay", "https://relay.example"])).toThrow(UsageError);
+  });
+});
+
+/**
+ * `runNew` cannot be called in-process: it ends in a renderer that takes over
+ * the terminal and never returns. Which stream each half of it goes to is the
+ * whole point of requirement 18, and that is only observable from outside, so
+ * this drives the real command and reads the two streams apart.
+ */
+describe("what `new` prints", () => {
+  const MAIN = new URL("../src/main.ts", import.meta.url).pathname;
+
+  async function firstLineOf(stream: ReadableStream<Uint8Array>): Promise<string> {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`the stream ended before a line: ${buffered}`);
+
+        buffered += decoder.decode(value, { stream: true });
+        const newline = buffered.indexOf("\n");
+        if (newline >= 0) return buffered.slice(0, newline);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  it("puts the invite on stdout and the scrollback warning on stderr", async () => {
+    // A relay that is not there: the invite is minted and printed before
+    // anything is dialled, and nothing here is about connecting.
+    const child = Bun.spawn(
+      [process.execPath, "run", MAIN, "new", "--relay", "ws://localhost:1", "--nick", "alice"],
+      { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
+    );
+
+    try {
+      const [invite, warning] = await Promise.all([
+        firstLineOf(child.stdout),
+        firstLineOf(child.stderr),
+      ]);
+
+      // Piped and pasted, the invite has to arrive on its own: a warning mixed
+      // into stdout would travel with the thing it warns about.
+      expect(parseInvite(invite).relay).toBe("wss://localhost:1/");
+      expect(warning).toBe(SCROLLBACK_WARNING);
+    } finally {
+      // It is sitting in a chat screen by now, and would sit there forever.
+      child.kill();
+      await child.exited;
+    }
   });
 });
 

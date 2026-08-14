@@ -25,7 +25,8 @@ Usage:
 
   termino join <invite> [--nick <name>]
       Joins the channel an invite names. The relay comes from the invite, so
-      --relay is not accepted here.
+      --relay is not accepted here. An invite carries a host and no scheme: it
+      is dialled over wss://, or over ws:// when the host is localhost.
 
   termino serve [--port <n>]
       Relay. Default port ${DEFAULT_RELAY_PORT}, WebSocket path /.
@@ -180,6 +181,32 @@ export function resolveRelayUrl(given: string, insecure: boolean): string {
   );
 }
 
+/**
+ * The URL an invite is dialled on.
+ *
+ * An invite carries a host and deliberately no scheme, so `parseInvite` hands
+ * back `wss://` — the only answer that is safe over a network nobody controls.
+ * Loopback is the one host where that answer is not cautious but wrong: nothing
+ * issues a certificate for `localhost`, so `wss://localhost` cannot be dialled
+ * at all, and an invite naming it can only have come from the same machine.
+ *
+ * This is the same exemption `resolveRelayUrl` makes for `--relay`, read from
+ * the other direction, and it is made here rather than in `parseInvite` for the
+ * same reason the scheme is not in the token: which schemes this client will
+ * dial is the client's policy, not the invite's.
+ *
+ * The alternative was an `--insecure` flag on `join`. It was rejected: it would
+ * put a security-waiving flag on the ordinary path of trying termino out on one
+ * machine, which teaches the habit of typing it.
+ */
+export function inviteRelayUrl(fromInvite: string): string {
+  const parsed = new URL(fromInvite);
+  if (!LOOPBACK_HOSTS.has(parsed.hostname)) return fromInvite;
+
+  parsed.protocol = "ws:";
+  return parsed.toString();
+}
+
 interface Flags {
   values: Map<string, string>;
   switches: Set<string>;
@@ -268,7 +295,7 @@ async function runJoin(command: JoinCommand): Promise<void> {
 
   try {
     const invite = parseInvite(command.invite);
-    await runChat(invite.psk, invite.relay, command.nick);
+    await runChat(invite.psk, inviteRelayUrl(invite.relay), command.nick);
   } catch (error) {
     if (error instanceof InvalidInviteError) throw new UsageError(error.message);
     throw error;

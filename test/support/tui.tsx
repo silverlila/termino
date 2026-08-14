@@ -1,6 +1,11 @@
 import { testRender } from "@opentui/react/test-utils";
 import { generatePsk } from "../../shared/crypto/psk.ts";
-import { startSession, type Session, type SessionHandlers } from "../../src/session.ts";
+import {
+  startSession,
+  type Session,
+  type SessionHandlers,
+  type SessionOptions,
+} from "../../src/session.ts";
 import { App } from "../../src/tui/App.tsx";
 import { wait } from "./harness.ts";
 
@@ -53,7 +58,17 @@ const peers: Peer[] = [];
  * every update is by definition outside an `act` call, and leaving it on
  * yields a warning per message and nothing else.
  */
-export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
+export async function mountChat(
+  nick: string,
+  relayUrl: string,
+  // Presence and the handshake are both measured in tens of seconds. A test
+  // that watches somebody go quiet, or watches nobody arrive at all, hands in
+  // its own timings or spends the difference asleep.
+  timings: Pick<
+    SessionOptions,
+    "pingIntervalMs" | "presenceExpiryMs" | "handshakeTimeoutMs"
+  > = {},
+): Promise<Chat> {
   // The real one tears down the renderer and ends the process; a test records
   // that it was asked to instead, and keeps its screen.
   const exits: number[] = [];
@@ -61,7 +76,7 @@ export async function mountChat(nick: string, relayUrl: string): Promise<Chat> {
   // The same closure the CLI builds: the secret is captured here rather than
   // handed to the component, so nothing secret is a prop in a test either.
   const connect = (handlers: SessionHandlers) =>
-    startSession({ psk: PSK, nick, relayUrl, handlers });
+    startSession({ psk: PSK, nick, relayUrl, handlers, ...timings });
 
   const screen = await testRender(
     <App nick={nick} connect={connect} onExit={() => exits.push(Date.now())} />,

@@ -50,7 +50,7 @@ export function App({ nick, connect, onExit }: AppProps) {
         nick={nick}
         sasWords={chat.sasWords}
         connection={chat.connection}
-        presence={chat.presence}
+        peerPresent={chat.peerPresent}
       />
       <MessageList entries={chat.entries} />
       <Composer onSubmit={chat.submit} />
@@ -106,13 +106,27 @@ export function gapNotice(nick: string, count: number): string {
 
 export const THIRD_PARTY_NOTICE = "⚠ a third party tried to join this channel";
 
+/**
+ * A session that never started, said the way the other alarms on this screen
+ * are said.
+ *
+ * The message comes from below — "nobody else is here yet" or "wrong invite, or
+ * somebody is in the middle" — and both end the same way: nothing was sent and
+ * nothing will be. The marker and the tone are this layer's, because a line
+ * that reads like the relay hiccuped is one the user shrugs at and re-runs,
+ * which is the wrong response to the second of those two.
+ */
+export function failedNotice(reason: string): string {
+  return `⚠ ${reason}`;
+}
+
 /** A line before the transcript has given it its position. */
 type LineDraft = Omit<MessageEntry, "id"> | Omit<NoticeEntry, "id">;
 
 interface Chat {
   entries: Entry[];
   connection: ConnectionState;
-  presence: number;
+  peerPresent: boolean;
   sasWords: string;
   /** One composer line: a message to send, or a command to run. */
   submit: (line: string) => void;
@@ -122,6 +136,9 @@ function useChat(options: AppProps): Chat {
   const [lines, setLines] = useState<TranscriptLine[]>([]);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [sasWords, setSasWords] = useState("");
+  // Said by the peer's own payloads and nothing else, so the relay cannot
+  // assert somebody is here who is not.
+  const [peerPresent, setPeerPresent] = useState(false);
   const session = useRef<Session | null>(null);
   const nextId = useRef(0);
   // The flood counter, and the line it is being written on. A ref because it
@@ -183,7 +200,13 @@ function useChat(options: AppProps): Chat {
           });
         },
         onConnectionChange: setConnection,
-        onPeerJoined: setSasWords,
+        // The words arrive with the peer, because there is nothing to show
+        // until there is somebody to compare them with.
+        onPeerJoined: (words) => {
+          setSasWords(words);
+          setPeerPresent(true);
+        },
+        onPeerGone: () => setPeerPresent(false),
         onGap: (nick, count) => notice(gapNotice(nick, count)),
         // The conversation has room for two. Somebody arriving with a third
         // key is either lost or trying something.
@@ -201,7 +224,7 @@ function useChat(options: AppProps): Chat {
         (error: Error) => {
           if (!mounted) return;
           setConnection("closed");
-          notice(error.message, "alarm");
+          notice(failedNotice(error.message), "alarm");
         },
       );
 
@@ -256,14 +279,5 @@ function useChat(options: AppProps): Chat {
     [leave, notice, send],
   );
 
-  return {
-    entries: lines,
-    connection,
-    sasWords,
-    // A session exists only once a peer's confirm has opened, so "connected"
-    // and "somebody else is here" are the same fact until authenticated pings
-    // can tell them apart.
-    presence: connection === "open" ? 2 : 1,
-    submit,
-  };
+  return { entries: lines, connection, sasWords, peerPresent, submit };
 }
