@@ -118,7 +118,14 @@ export async function openMessage(messageKey: MessageKey, frame: MsgFrame): Prom
   return parsePayload(new TextDecoder().decode(unpad(plaintext)));
 }
 
-function parsePayload(text: string): Payload {
+/**
+ * Exported for the fuzzer, which drives it directly: `openMessage` also throws
+ * `DecryptError` and `PaddingError`, so "only `PayloadError` escapes" is a claim
+ * that can only be made about this function. Nothing outside `openMessage`
+ * should call it — a payload that has not been through the AEAD is not a
+ * payload, whatever shape it has.
+ */
+export function parsePayload(text: string): Payload {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -148,8 +155,22 @@ function parsePayload(text: string): Payload {
 
 function readType(value: unknown): PayloadType {
   const known = PAYLOAD_TYPES.find((type) => type === value);
-  if (known === undefined) throw new PayloadError(`unknown payload type ${JSON.stringify(value)}`);
+  if (known === undefined) throw new PayloadError(`unknown payload type ${describe(value)}`);
   return known;
+}
+
+/**
+ * Names a rejected value without serialising it. `JSON.stringify` recurses, so
+ * a deeply nested value spends the receiver's stack — and, just short of that,
+ * hundreds of milliseconds — inside the error that exists to reject it. Found
+ * by `scripts/fuzz-long.ts`, which is why the corpus carries the two inputs.
+ */
+function describe(value: unknown): string {
+  if (typeof value === "object" && value !== null) {
+    return Array.isArray(value) ? "an array" : "an object";
+  }
+
+  return JSON.stringify(value) ?? "undefined";
 }
 
 /**

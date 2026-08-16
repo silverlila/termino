@@ -1,0 +1,1 @@
+{"t":"ping","nick":"alice","body":"x"}
