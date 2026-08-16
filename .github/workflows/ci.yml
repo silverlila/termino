@@ -32,6 +32,7 @@ jobs:
       - run: bun run check:no-v1
       - run: bun run check:no-secret-props
       - run: bun run check:no-persistence
+      - run: bun run check:unaudited
 
       # A shared runner is the slow machine the README's timeout note is about.
       - run: bun test --timeout 30000
