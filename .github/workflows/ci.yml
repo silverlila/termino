@@ -27,6 +27,7 @@ jobs:
       - run: bun run check:ci
       - run: bun run check:no-deno
       - run: bun run check:relay-pure
+      - run: bun run check:relay-silent
       - run: bun run check:readme
       - run: bun run check:no-v1
       - run: bun run check:no-secret-props
