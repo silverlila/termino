@@ -1,0 +1,36 @@
+name: CI
+
+# The whole Verification block, on every push. Nothing here needs a Docker
+# daemon, a hosting account or a signing key — that is deliberate.
+on: push
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned, not `latest`: bun.lock pins pre-1.0 OpenTUI builds, and a
+      # floating runtime undoes that pinning from underneath.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.18
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run typecheck
+
+      # check:ci first, so a guard that exists but never runs here fails the
+      # run before the guards it is meant to be watching. It reads this file
+      # for one command per `- run:` step, so do not fold these into a
+      # `run: |` block — check:ci would report the folded ones as never run.
+      - run: bun run check:ci
+      - run: bun run check:no-deno
+      - run: bun run check:relay-pure
+      - run: bun run check:readme
+      - run: bun run check:no-v1
+      - run: bun run check:no-secret-props
+      - run: bun run check:no-persistence
+
+      # A shared runner is the slow machine the README's timeout note is about.
+      - run: bun test --timeout 30000
