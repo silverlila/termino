@@ -678,6 +678,38 @@ describe("a gap in the numbering", () => {
   });
 });
 
+describe("a frame that does not decode", () => {
+  it("is announced rather than dropped in silence", async () => {
+    // Bytes cut off the end of one message on its way to the client. An honest
+    // relay forwards what it was given byte for byte, so this is somebody on
+    // the path — and it costs the reader a line they will never see.
+    //
+    // Nothing else on this side would say so: the counter it carried is never
+    // taken, so it does not read as a delivered message, and the gap it leaves
+    // is not counted until a later message has stepped over it.
+    const meddler = startMeddler(relay.port, {
+      toClient(raw, deliver) {
+        const frame = decodeFrame(raw);
+        if (frame.t === "msg" && frame.i === 1) return deliver(raw.slice(0, raw.length - 5));
+
+        deliver(raw);
+      },
+    });
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      await alice.session.send("one");
+      await until(() => bob.got.decryptErrors.length === 1);
+      await settle();
+
+      expect(bob.got.messages).toEqual([]);
+    } finally {
+      meddler.stop();
+    }
+  });
+});
+
 /**
  * One session with somebody on the other end who completes a real handshake,
  * confirms, and then says nothing more.
