@@ -18,6 +18,11 @@ routing label and a blob of ciphertext it forwards byte for byte.
 A channel holds exactly two people. There are no accounts, no passwords, no channel names, and
 nothing is written to disk — not even by termino itself.
 
+> ⚠ **This is unaudited software.** Nobody outside this project has reviewed how these
+> primitives were assembled into a protocol, and assembly is where the mistakes live. Read
+> [THREAT-MODEL.md](THREAT-MODEL.md) — it says in plain words who this protects you from and
+> who it does not — before trusting it with anything that would hurt to lose.
+
 ## Running it
 
 ```sh
@@ -62,6 +67,23 @@ have come from the machine you are on.
 Both sides block until the other one answers. Until then the status bar says
 `waiting for the other side…`, and after twenty seconds the client gives up and says which of the
 two things went wrong.
+
+## Somebody has to run the relay, and it is not us
+
+This project **operates no relay**. There is no public address to point a client at, no free
+tier and no paid one: the relay in the diagram is a program in this repository that you or the
+person you are talking to has to run somewhere. Carrying strangers' traffic that nobody can
+inspect means abuse reports nobody can verify and legal demands nobody can answer usefully,
+which is a thing to take on deliberately or not at all.
+
+That has a consequence worth being clear about, because it is not the encryption's problem to
+solve. Whoever runs a relay cannot read a single message, but
+**sees who connects, from what IP and when** — and if the relay is carrying exactly one
+conversation, as a self-hosted one usually is, then everyone who connects to it is a participant
+in that conversation. The client dials the
+relay **directly**: there is no proxy option and no Tor support in this version, so the real
+addresses of both ends reach that host, and reach anyone who seizes, subpoenas or shares it.
+`THREAT-MODEL.md` sets out what that does and does not expose.
 
 ## Who you are talking to
 
@@ -121,7 +143,8 @@ out loud.
 
 ## What Termino does not protect you against
 
-Read this section before trusting it with anything.
+Read this section before trusting it with anything. [THREAT-MODEL.md](THREAT-MODEL.md) says the
+same things at length, with the reasoning, and adds who each of them lets in.
 
 - **Messages already sent are unrecoverable — the live session is not.** Each message gets its own
   key, which is derived, used once, and destroyed. Nobody can recompute it afterwards, including
@@ -132,7 +155,12 @@ Read this section before trusting it with anything.
   heal, and the only cure is to end it, mint a new invite and start again.
 - **The relay sees who talks to whom, and when.** It cannot read a message, but it sees your
   connection, your IP address, a routing label, message sizes and timing, and it can tell that the
-  same two parties are talking. Metadata and traffic analysis are not defended against at all.
+  same two parties are talking. The client connects directly, so nothing hides those addresses.
+  Metadata and traffic analysis are not defended against at all.
+- **The routing label is fixed for the life of an invite.** Minting a new invite gives you a new
+  one, but that costs another out-of-band handover — the expensive human step — so in practice
+  one label carries every session two people ever have on that invite. Whoever runs a relay for
+  more than one pair can tell the pairs apart and see that each of them keeps coming back.
 - **Whoever holds the invite is in the channel.** There is no membership and no way to revoke: the
   invite *is* the door. If you are not sure who it reached, mint a new one — that is cheap, and the
   old one opens nothing that was recorded under it.
@@ -155,9 +183,10 @@ Read this section before trusting it with anything.
   one address, refuses a third connection to a channel, drops a connection idle for 120 seconds and
   rate-limits each one to five frames per ten seconds. Somebody spread across enough addresses can
   still fill those slots. None of that exposes a message; it can stop one arriving.
-- **None of this has been audited.** The primitives are `@noble/curves`, `@noble/hashes` and
+- **This is unaudited software.** The primitives are `@noble/curves`, `@noble/hashes` and
   WebCrypto, which are sound. Assembling primitives into a protocol is where mistakes live, and
-  this assembly has had no external review.
+  this assembly has had no external review. The banner on the status bar says so on every screen,
+  and stays until an audit exists.
 
 ## Wire format
 

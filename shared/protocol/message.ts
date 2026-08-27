@@ -18,6 +18,13 @@ import { bodyProblem, nickProblem } from "./text.ts";
  * There is no timestamp either. Nothing trusted the sender's clock even when
  * one was carried; the receiver's arrival time is the only clock it can vouch
  * for.
+ *
+ * No error path here may `JSON.stringify` a value it is rejecting. `stringify`
+ * recurses, so a deeply nested payload costs the receiver real time and then
+ * throws `RangeError` — inside the code whose only job was to refuse it, and
+ * out through a parser that promises to throw `PayloadError` and nothing else.
+ * `describe` names the shape instead. The two nested-* files under test/corpus
+ * hold that line.
  */
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
@@ -118,7 +125,14 @@ export async function openMessage(messageKey: MessageKey, frame: MsgFrame): Prom
   return parsePayload(new TextDecoder().decode(unpad(plaintext)));
 }
 
-function parsePayload(text: string): Payload {
+/**
+ * Exported for the fuzzer, which drives it directly: `openMessage` also throws
+ * `DecryptError` and `PaddingError`, so "only `PayloadError` escapes" is a claim
+ * that can only be made about this function. Nothing outside `openMessage`
+ * should call it — a payload that has not been through the AEAD is not a
+ * payload, whatever shape it has.
+ */
+export function parsePayload(text: string): Payload {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -148,8 +162,16 @@ function parsePayload(text: string): Payload {
 
 function readType(value: unknown): PayloadType {
   const known = PAYLOAD_TYPES.find((type) => type === value);
-  if (known === undefined) throw new PayloadError(`unknown payload type ${JSON.stringify(value)}`);
+  if (known === undefined) throw new PayloadError(`unknown payload type ${describe(value)}`);
   return known;
+}
+
+function describe(value: unknown): string {
+  if (typeof value === "object" && value !== null) {
+    return Array.isArray(value) ? "an array" : "an object";
+  }
+
+  return JSON.stringify(value) ?? "undefined";
 }
 
 /**

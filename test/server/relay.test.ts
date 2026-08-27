@@ -1,3 +1,14 @@
+/**
+ * The relay's own tests: routing, the rate limiter, the connection caps, and
+ * that it says nothing about anyone.
+ *
+ * A dependency that writes straight to fd 1 or 2 is invisible to a patched
+ * `console`, so the silence cases assert against a spawned `src/main.ts serve`
+ * rather than an in-process relay. Bun prints an exception that escapes a fetch
+ * or socket handler with a stack trace, and answers 500 for a fetch handler that
+ * threw — the frame, the handle and the sender's address are all in scope when
+ * it does, which is what the `onError` and 429 cases exist to prevent.
+ */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   decodeFrame,
@@ -54,8 +65,8 @@ async function until(condition: () => boolean, timeoutMs = 2000): Promise<void> 
 /** Long enough for anything in flight to land. Used before asserting absence. */
 const settle = () => wait(80);
 
-async function connect(): Promise<TestClient> {
-  const socket = new WebSocket(`ws://localhost:${relay.port}/`);
+async function connect(port = portOf(relay)): Promise<TestClient> {
+  const socket = new WebSocket(`ws://localhost:${port}/`);
   const received: Frame[] = [];
 
   socket.addEventListener("message", (event) => received.push(decodeFrame(String(event.data))));
@@ -81,8 +92,8 @@ async function connect(): Promise<TestClient> {
  * is what stops the *next* client's message racing ahead of this one's
  * subscription, which is a cross-socket ordering the relay does not promise.
  */
-async function subscribed(handle = HANDLE): Promise<TestClient> {
-  const client = await connect();
+async function subscribed(handle = HANDLE, port = portOf(relay)): Promise<TestClient> {
+  const client = await connect(port);
   client.send(subFrame(handle));
   await wait(25);
   return client;
@@ -541,5 +552,159 @@ describe("connection limits", () => {
     // constant is the assertion. It exists so the value stops moving with the
     // Bun version.
     expect(IDLE_TIMEOUT_SECONDS).toBe(120);
+  });
+});
+
+describe("writing nothing", () => {
+  const MAIN = new URL("../../src/main.ts", import.meta.url).pathname;
+
+  /** Accumulates a stream into a string as it arrives, so a test can wait for
+   * the startup line and still see everything written after it. */
+  async function drain(stream: ReadableStream<Uint8Array>, sink: { text: string }): Promise<void> {
+    const decoder = new TextDecoder();
+    for await (const chunk of stream) sink.text += decoder.decode(chunk, { stream: true });
+  }
+
+  it("writes nothing across a connection lifecycle", async () => {
+    // Spawned rather than started in this process: a dependency writing
+    // straight to the file descriptor bypasses any patched `console`, and what
+    // an operator vouches for is the process, not a module.
+    const child = Bun.spawn([process.execPath, "run", MAIN, "serve", "--port", "0"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+
+    const out = { text: "" };
+    const err = { text: "" };
+    const drained = Promise.all([drain(child.stdout, out), drain(child.stderr, err)]);
+    let port = 0;
+
+    try {
+      await until(() => out.text.includes("\n"), 10_000);
+      port = Number(/ws:\/\/localhost:(\d+)/.exec(out.text)?.[1]);
+      expect(port).toBeGreaterThan(0);
+
+      const alice = await subscribed(HANDLE, port);
+      const bob = await subscribed(HANDLE, port);
+
+      alice.send(msgFrame(HANDLE, 0, CIPHERTEXT));
+      await until(() => framesOfType(bob, "msg").length === 1);
+
+      alice.sendRaw("{not json");
+      await until(() => framesOfType(alice, "err").length === 1);
+
+      // This relay runs on the real clock, so the window cannot be skipped
+      // past: a malformed frame is refused before it is charged, leaving
+      // alice three tokens of five, and these five exhaust them.
+      for (let sent = 1; sent <= RATE_LIMIT_MESSAGES; sent++) {
+        alice.send(msgFrame(HANDLE, sent, CIPHERTEXT));
+      }
+      await until(() =>
+        alice.received.some((frame) => frame.t === "err" && frame.code === "rate_limited"),
+      );
+
+      alice.close();
+      bob.close();
+      await settle();
+    } finally {
+      child.kill();
+      await child.exited;
+      await drained;
+    }
+
+    expect(out.text).toBe(`termino relay listening on ws://localhost:${port}\n`);
+    expect(err.text).toBe("");
+  }, 20_000);
+
+  it("hands an unexpected failure to onError rather than throwing it at Bun", async () => {
+    // An exception escaping the message handler is printed by Bun with a stack
+    // trace, and the frame and the sender are in scope when it is. There is no
+    // way to make the relay fail from the wire — that is the point of the
+    // parser — so the injected clock stands in for whatever unanticipated
+    // failure a future change brings.
+    let failures = 0;
+    let clockBroken = false;
+    const server = startRelay({
+      port: 0,
+      now: () => {
+        if (clockBroken) throw new Error("the clock is unavailable");
+        return clock;
+      },
+      onError: () => {
+        failures += 1;
+      },
+    });
+
+    try {
+      const client = await subscribed(HANDLE, portOf(server));
+      clockBroken = true;
+
+      client.send(msgFrame(HANDLE, 0, CIPHERTEXT));
+      await until(() => framesOfType(client, "err").length === 1);
+      clockBroken = false;
+
+      expect(failures).toBe(1);
+      expect(framesOfType(client, "err")).toEqual([{ v: 2, t: "err", code: "bad_frame" }]);
+      expect(client.isOpen()).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("refuses a connection it cannot serve rather than throwing at Bun", async () => {
+    let failures = 0;
+    const server = startRelay({
+      port: 0,
+      now: () => {
+        throw new Error("the clock is unavailable");
+      },
+      onError: () => {
+        failures += 1;
+      },
+    });
+
+    try {
+      const port = portOf(server);
+
+      expect((await fetch(`http://127.0.0.1:${port}/`)).status).toBe(429);
+      await expect(openSocket(port)).rejects.toThrow("refused");
+
+      expect(failures).toBe(2);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("keeps answering the sender when the caller's onError throws", async () => {
+    let clockBroken = false;
+    const server = startRelay({
+      port: 0,
+      now: () => {
+        if (clockBroken) throw new Error("the clock is unavailable");
+        return clock;
+      },
+      onError: () => {
+        throw new Error("the reporter is broken too");
+      },
+    });
+
+    try {
+      const client = await subscribed(HANDLE, portOf(server));
+      clockBroken = true;
+
+      client.send(msgFrame(HANDLE, 0, CIPHERTEXT));
+      await until(() => framesOfType(client, "err").length === 1);
+      clockBroken = false;
+
+      expect(framesOfType(client, "err")).toEqual([{ v: 2, t: "err", code: "bad_frame" }]);
+      expect(client.isOpen()).toBe(true);
+
+      const listener = await subscribed(HANDLE, portOf(server));
+      client.send(msgFrame(HANDLE, 1, CIPHERTEXT));
+      await until(() => framesOfType(listener, "msg").length === 1);
+    } finally {
+      server.stop(true);
+    }
   });
 });

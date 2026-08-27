@@ -341,7 +341,10 @@ async function runServe(command: ServeCommand): Promise<void> {
   // the only thing the two share is the wire format.
   const { startRelay } = await import("../server/relay.ts");
 
-  const server = startRelay({ port: command.port });
+  const server = startRelay({
+    port: command.port,
+    onError: () => process.stderr.write("termino relay: a connection failed\n"),
+  });
   stdout.write(`termino relay listening on ws://localhost:${server.port}\n`);
 }
 

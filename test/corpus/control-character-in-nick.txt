@@ -1,0 +1,1 @@
+{"t":"text","nick":"a\u0000b","body":"x"}

@@ -221,8 +221,19 @@ export async function startSession(options: SessionOptions): Promise<Session> {
   socket.send(encodeFrame(helloFrame(handle, ephemeral.publicKey)));
 
   async function receive(raw: string): Promise<void> {
-    const frame = parse(raw);
-    if (frame === null) return;
+    let frame: Frame;
+    try {
+      frame = decodeFrame(raw);
+    } catch (error) {
+      // An honest relay forwards a message byte for byte, so a frame that does
+      // not decode is one somebody cut, padded or rewrote on the way. It is
+      // announced rather than dropped in silence because it may have been a
+      // message: the counter it carried is never taken, so nothing else here
+      // will notice it went missing until a later message steps over it — and
+      // a corrupted `hello` would produce no news at all until the handshake
+      // gave up.
+      return handlers.onDecryptError?.(asError(error));
+    }
 
     if (frame.t === "err") {
       handlers.onRelayError?.(frame.code);
@@ -524,17 +535,6 @@ export async function startSession(options: SessionOptions): Promise<Session> {
       return overwritten;
     },
   };
-}
-
-/** The relay only ever sends well-formed frames. One that is not means
- * something upstream is broken or hostile; there is nothing useful to do with
- * it but drop it. */
-function parse(raw: string): Frame | null {
-  try {
-    return decodeFrame(raw);
-  } catch {
-    return null;
-  }
 }
 
 function asError(error: unknown): Error {

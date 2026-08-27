@@ -38,6 +38,8 @@ export function stateLabel(connection: ConnectionState, peerPresent: boolean): s
   return peerPresent ? "connected · both here" : "connected · the other side has gone quiet";
 }
 
+const UNAUDITED_BANNER = "⚠ unaudited — no external security review; see THREAT-MODEL.md";
+
 export const SAS_LABEL = "session words:";
 
 /** Under the words rather than over them: it is read after the eye has already
@@ -48,6 +50,9 @@ export const SAS_INSTRUCTION =
 export function StatusBar({ nick, sasWords, connection, peerPresent }: StatusBarProps) {
   return (
     <box style={{ flexDirection: "column", flexShrink: 0, backgroundColor: "#1f2430" }}>
+      <box style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1 }}>
+        <text style={{ fg: "#e0a35c" }}>{UNAUDITED_BANNER}</text>
+      </box>
       <box style={{ flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
         <text style={{ fg: "#c8d3f5" }}>{nick}</text>
         <text style={{ fg: "#8b93a8" }}>{stateLabel(connection, peerPresent)}</text>

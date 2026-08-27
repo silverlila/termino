@@ -17,6 +17,15 @@ import {
  * It has no access to a key and no way to obtain one, so "the relay cannot
  * read your messages" is a property of the import graph rather than a promise
  * — `bun run check:relay-pure` fails the build if that ever stops being true.
+ *
+ * Three things about Bun decide the shape of what follows. An exception that
+ * escapes a fetch or socket handler is printed with a stack trace, and the
+ * frame, the handle and the sender's address are all in scope when it happens,
+ * so nothing here may let one out. `undefined` returned from fetch is how Bun
+ * is told the upgrade handshake was the response; every other path answers with
+ * a Response. And a browser attaches an Origin header to a WebSocket handshake
+ * where the CLI never does, so an Origin arriving at all means a browser page
+ * is driving the socket.
  */
 
 export const DEFAULT_PORT = 8787;
@@ -95,10 +104,18 @@ export interface RelayOptions {
    * to be the thing that refused. */
   maxConnections?: number;
   maxConnectionsPerIp?: number;
+  /** Called when serving a frame fails in a way this file did not anticipate.
+   * It takes no arguments and returns nothing on purpose: the relay must be
+   * able to report *that* something went wrong without being able to say
+   * anything about whom it happened to. Whoever wants that fact printed prints
+   * it in the entrypoint — `bun run check:relay-silent` forbids this file from
+   * writing anything at all. */
+  onError?: () => void;
 }
 
 export function startRelay(options: RelayOptions = {}) {
   const now = options.now ?? Date.now;
+  const onError = options.onError ?? (() => {});
   const maxConnections = options.maxConnections ?? MAX_CONNECTIONS;
   const maxConnectionsPerIp = options.maxConnectionsPerIp ?? MAX_CONNECTIONS_PER_IP;
 
@@ -108,50 +125,25 @@ export function startRelay(options: RelayOptions = {}) {
   const server = Bun.serve<Connection, {}>({
     port: options.port ?? DEFAULT_PORT,
 
-    fetch(request, server) {
-      if (new URL(request.url).pathname !== "/") return refuse("only / is served");
-
-      // The CLI sends no Origin header. One arriving means a browser page is
-      // driving the socket, which is not a client this relay serves.
-      if (request.headers.has("origin")) return refuse("no browser clients");
-
-      const source = server.requestIP(request)?.address ?? UNKNOWN_SOURCE;
-      if (openConnections >= maxConnections) return refuse("too many connections");
-      if ((openPerSource.get(source) ?? 0) >= maxConnectionsPerIp) {
-        return refuse("too many connections from this address");
+    fetch(request) {
+      try {
+        return admitRequest(request);
+      } catch {
+        attempt(onError);
+        return refuse("request refused");
       }
-
-      const connection: Connection = { handle: null, source, bucket: fullBucket(now()) };
-
-      // Counted before the upgrade rather than in `open`, so a burst of
-      // simultaneous requests cannot all pass a check that nothing has
-      // incremented yet. The slot is given straight back if this turns out not
-      // to be a WebSocket request at all.
-      admit(source);
-      if (server.upgrade(request, { data: connection })) return undefined;
-      release(source);
-
-      return new Response("termino relay: websocket only\n", { status: 426 });
     },
 
     websocket: {
       idleTimeout: IDLE_TIMEOUT_SECONDS,
 
       message(ws, raw) {
-        const frame = parse(raw);
-
-        if (frame === null) return reject(ws, "bad_frame");
-
-        // Every frame the relay acts on costs a token, not just `msg`. A `sub`
-        // is cheap to send and expensive to serve, so charging only `msg` left
-        // a client free to toggle between two handles and make the relay do
-        // subscription work for nothing.
-        const limit = takeToken(ws.data.bucket, now());
-        ws.data.bucket = limit.bucket;
-        if (!limit.allowed) return reject(ws, "rate_limited");
-
-        if (frame.t === "sub") return subscribe(ws, frame);
-        return forward(ws, frame, raw);
+        try {
+          route(ws, raw);
+        } catch {
+          attempt(() => reject(ws, "bad_frame"));
+          attempt(onError);
+        }
       },
 
       close(ws) {
@@ -159,6 +151,57 @@ export function startRelay(options: RelayOptions = {}) {
       },
     },
   });
+
+  /**
+   * Runs `work` and gives up quietly if it throws — the only place in this
+   * file allowed to do that, and the reason is the whole point of the file.
+   * An exception escaping one of Bun's handlers is printed by Bun with a stack
+   * trace, and the frame, the handle and the sender's address are all in scope
+   * when it does. Every step of failing therefore runs through here: answering
+   * a sender goes through a socket that may already be closing, and reporting
+   * goes through `onError`, which belongs to the caller and can fail like
+   * anything else. When reporting itself is what failed there is nowhere left
+   * to report to, which is where the relay stops.
+   */
+  function attempt(work: () => void): void {
+    try {
+      work();
+    } catch {}
+  }
+
+  /** Returns undefined once the socket is upgraded — Bun reads that as "the
+   * handshake is the response". */
+  function admitRequest(request: Request): Response | undefined {
+    if (new URL(request.url).pathname !== "/") return refuse("only / is served");
+
+    // The CLI sends no Origin header. One arriving means a browser page is
+    // driving the socket, which is not a client this relay serves.
+    if (request.headers.has("origin")) return refuse("no browser clients");
+
+    const source = server.requestIP(request)?.address ?? UNKNOWN_SOURCE;
+    if (openConnections >= maxConnections) return refuse("too many connections");
+    if ((openPerSource.get(source) ?? 0) >= maxConnectionsPerIp) {
+      return refuse("too many connections from this address");
+    }
+
+    const connection: Connection = { handle: null, source, bucket: fullBucket(now()) };
+
+    // Counted before the upgrade rather than in `open`, so a burst of
+    // simultaneous requests cannot all pass a check that nothing has
+    // incremented yet. The slot is given straight back if this turns out not to
+    // be a WebSocket request at all — or if the upgrade throws, since the
+    // caller answers 429 and no `close` will ever arrive to free it.
+    admit(source);
+    let upgraded = false;
+    try {
+      upgraded = server.upgrade(request, { data: connection });
+    } finally {
+      if (!upgraded) release(source);
+    }
+
+    if (upgraded) return undefined;
+    return new Response("termino relay: websocket only\n", { status: 426 });
+  }
 
   /** A refusal before the upgrade has no `err` frame available — that frame
    * type only exists over an established WebSocket — so it answers 429, which
@@ -180,6 +223,19 @@ export function startRelay(options: RelayOptions = {}) {
     const remaining = (openPerSource.get(source) ?? 1) - 1;
     if (remaining > 0) openPerSource.set(source, remaining);
     else openPerSource.delete(source);
+  }
+
+  function route(ws: Bun.ServerWebSocket<Connection>, raw: string | Buffer): void {
+    const frame = parse(raw);
+
+    if (frame === null) return reject(ws, "bad_frame");
+
+    const limit = takeToken(ws.data.bucket, now());
+    ws.data.bucket = limit.bucket;
+    if (!limit.allowed) return reject(ws, "rate_limited");
+
+    if (frame.t === "sub") return subscribe(ws, frame);
+    return forward(ws, frame, raw);
   }
 
   function parse(raw: string | Buffer): ClientFrame | null {

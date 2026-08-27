@@ -678,6 +678,31 @@ describe("a gap in the numbering", () => {
   });
 });
 
+describe("a frame that does not decode", () => {
+  it("is announced rather than dropped in silence", async () => {
+    const meddler = startMeddler(relay.port, {
+      toClient(raw, deliver) {
+        const frame = decodeFrame(raw);
+        if (frame.t === "msg" && frame.i === 1) return deliver(raw.slice(0, raw.length - 5));
+
+        deliver(raw);
+      },
+    });
+
+    try {
+      const { alice, bob } = await pair(meddler.url);
+
+      await alice.session.send("one");
+      await until(() => bob.got.decryptErrors.length === 1);
+      await settle();
+
+      expect(bob.got.messages).toEqual([]);
+    } finally {
+      meddler.stop();
+    }
+  });
+});
+
 /**
  * One session with somebody on the other end who completes a real handshake,
  * confirms, and then says nothing more.

@@ -69,6 +69,23 @@ afterEach(() => {
 });
 
 describe("the chat screen", () => {
+  it("shows the unaudited banner on the first frame", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+
+    const frame = screen.captureCharFrame();
+    expect(frame).toContain("unaudited");
+    expect(frame).toContain("no external security review");
+    expect(frame).toContain("THREAT-MODEL.md");
+  });
+
+  it("keeps the unaudited banner up once a session is established", async () => {
+    const { screen } = await mountChat("alice", relay.url);
+    await joinAs("bob", relay.url);
+
+    const frame = await seeOnScreen(screen, "both here");
+    expect(frame).toContain("unaudited");
+  });
+
   it("shows the nickname, and says nobody is here until somebody is", async () => {
     const { screen } = await mountChat("alice", relay.url);
     const waiting = await seeOnScreen(screen, "alice");
