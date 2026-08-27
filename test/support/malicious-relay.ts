@@ -1,59 +1,39 @@
 import { decodeFrame } from "../../shared/protocol/frame.ts";
 
 /**
- * A relay that misbehaves on purpose.
+ * A relay that misbehaves on purpose. It forwards between exactly two clients
+ * and does whatever `policy` says to each frame on the way through, so a test
+ * can put the client in front of a hostile network without a hostile peer.
  *
- * The relay is the party this protocol is designed to defend against, and
- * every honest test in this suite runs against a relay that behaves. This one
- * sits where the honest one does — two clients dial it, it forwards between
- * them — and does what an attacker on the path can do instead: drop a frame,
- * hold frames back and let them out in another order, rewrite the bytes,
- * invent a frame of its own, deliver one twice, or stop carrying traffic in
- * either direction.
- *
- * It is driven synchronously from the test rather than on timers: a policy is
- * a decision made about the frame in hand, so a test that sets one before the
- * frame it means to catch cannot race it.
- *
- * It forwards rather than proxying to `server/relay.ts` on purpose. There is
- * no rate limit, no subscriber cap and no clock in here — a test about what
- * the *client* does with a hostile network should not also have to keep the
- * honest relay's limiter happy.
+ * Bun wants the per-connection data at `server.upgrade`, before any socket
+ * exists, but a side can only be claimed once one does — which is why `side`
+ * starts null and is assigned in `open`.
  */
 
 /** Which of the two connections a frame came from. Assigned in connection
  * order, so a test that means "everything alice sends" starts alice first. */
-export type Side = "a" | "b";
+type Side = "a" | "b";
 
-export type Partition = "none" | "a-to-b" | "b-to-a" | "both";
+type Partition = "none" | "both";
 
-export interface RelayPolicy {
+interface RelayPolicy {
   /** Return null to drop, a different string to rewrite, or `raw` unchanged.
    *  Frames travel as JSON strings — `encodeFrame` is `JSON.stringify`. */
   onFrame?(raw: string, from: Side): string | null;
-  /** Hold frames instead of forwarding, so a test can release them out of order. */
   hold?: boolean;
-  /** Stop forwarding in one or both directions. */
   partition?: Partition;
 }
 
 export interface MaliciousRelay {
-  /** What a client dials. */
   url: string;
-  /** Mutated in place by the test: `relay.policy.hold = true`. */
   policy: RelayPolicy;
   /** How many clients are connected. Both sides of a v2 session block until
    * the other answers, so a test starts them together — this is how it waits
    * for the first one to arrive before starting the second, which is what
    * makes `"a"` a known person rather than whichever socket won the race. */
   connections(): number;
-  /** Frames currently held, in arrival order. */
   held(): readonly string[];
-  /** Forward held frames by index — `release([1, 0])` delivers the second
-   * first. With no argument, everything held, in arrival order. */
-  release(indexes?: number[]): void;
-  /** A frame of the relay's own, straight to one client. Bypasses the policy:
-   * this frame was not forwarded from anywhere, which is the point of it. */
+  release(indexes: number[]): void;
   inject(raw: string, to: Side): void;
   close(): void;
 }
@@ -85,9 +65,6 @@ export function startMaliciousRelay(): MaliciousRelay {
       open(ws) {
         const side = freeSide();
 
-        // A conversation has room for two here as well. A third connection is
-        // not a case any of these tests drive, and accepting one silently
-        // would make a stray socket look like a delivery bug.
         if (side === null) return ws.close();
 
         ws.data.side = side;
@@ -125,7 +102,7 @@ export function startMaliciousRelay(): MaliciousRelay {
 
     const rewritten = policy.onFrame === undefined ? raw : policy.onFrame(raw, from);
     if (rewritten === null) return;
-    if (isPartitioned(from)) return;
+    if (isPartitioned()) return;
 
     const to: Side = from === "a" ? "b" : "a";
     if (policy.hold === true) {
@@ -136,28 +113,21 @@ export function startMaliciousRelay(): MaliciousRelay {
     deliver(to, rewritten);
   }
 
-  function isPartitioned(from: Side): boolean {
-    const partition = policy.partition ?? "none";
-    if (partition === "both") return true;
-    return partition === (from === "a" ? "a-to-b" : "b-to-a");
+  function isPartitioned(): boolean {
+    return (policy.partition ?? "none") === "both";
   }
 
   function deliver(to: Side, raw: string): void {
     sockets.get(to)?.send(raw);
   }
 
-  function release(indexes?: number[]): void {
-    const order = indexes ?? holding.map((_, index) => index);
-    const chosen = order.map((index) => {
+  function release(indexes: number[]): void {
+    const chosen = indexes.map((index) => {
       const frame = holding[index];
-      // Loudly, rather than delivering nothing: an index that names no frame
-      // means the test is holding a different set than it thinks it is.
       if (frame === undefined) throw new Error(`no frame is held at index ${index}`);
       return frame;
     });
 
-    // Emptied before anything goes out, so a policy that is still holding
-    // appends behind this batch rather than reshuffling the one being drained.
     for (const frame of chosen) holding.splice(holding.indexOf(frame), 1);
     for (const frame of chosen) deliver(frame.to, frame.raw);
   }
@@ -173,9 +143,6 @@ export function startMaliciousRelay(): MaliciousRelay {
   };
 }
 
-/** Anything that does not decode is not a `sub`, and is forwarded — a client
- * that sends a frame this cannot read is a case worth carrying to the far end
- * rather than swallowing here. */
 function isSubscription(raw: string): boolean {
   try {
     return decodeFrame(raw).t === "sub";

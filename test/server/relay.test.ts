@@ -1,3 +1,14 @@
+/**
+ * The relay's own tests: routing, the rate limiter, the connection caps, and
+ * that it says nothing about anyone.
+ *
+ * A dependency that writes straight to fd 1 or 2 is invisible to a patched
+ * `console`, so the silence cases assert against a spawned `src/main.ts serve`
+ * rather than an in-process relay. Bun prints an exception that escapes a fetch
+ * or socket handler with a stack trace, and answers 500 for a fetch handler that
+ * threw — the frame, the handle and the sender's address are all in scope when
+ * it does, which is what the `onError` and 429 cases exist to prevent.
+ */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   decodeFrame,
@@ -54,8 +65,6 @@ async function until(condition: () => boolean, timeoutMs = 2000): Promise<void> 
 /** Long enough for anything in flight to land. Used before asserting absence. */
 const settle = () => wait(80);
 
-/** Defaults to the shared relay; the port is a parameter for the cases that
- * drive a relay of their own, including the one running in another process. */
 async function connect(port = portOf(relay)): Promise<TestClient> {
   const socket = new WebSocket(`ws://localhost:${port}/`);
   const received: Frame[] = [];
@@ -546,12 +555,6 @@ describe("connection limits", () => {
   });
 });
 
-/**
- * "We have nothing" is a claim an operator gets asked to make, so it has to be
- * true of the process rather than of a module read carefully. `check:relay-silent`
- * keeps the source free of anything that writes; these cases watch the file
- * descriptors while the relay is actually used.
- */
 describe("writing nothing", () => {
   const MAIN = new URL("../../src/main.ts", import.meta.url).pathname;
 
@@ -610,7 +613,6 @@ describe("writing nothing", () => {
       await drained;
     }
 
-    // Exactly the startup line: not a prefix of the output, the whole of it.
     expect(out.text).toBe(`termino relay listening on ws://localhost:${port}\n`);
     expect(err.text).toBe("");
   }, 20_000);
@@ -642,9 +644,6 @@ describe("writing nothing", () => {
       await until(() => framesOfType(client, "err").length === 1);
       clockBroken = false;
 
-      // The failure is reported as a bare fact — `onError` takes no arguments,
-      // so nothing about this connection can leave with it — and the sender is
-      // answered rather than left waiting on a frame that will never come.
       expect(failures).toBe(1);
       expect(framesOfType(client, "err")).toEqual([{ v: 2, t: "err", code: "bad_frame" }]);
       expect(client.isOpen()).toBe(true);
@@ -654,9 +653,6 @@ describe("writing nothing", () => {
   });
 
   it("refuses a connection it cannot serve rather than throwing at Bun", async () => {
-    // The clock has two call sites, and this is the other one: a connection is
-    // given a full bucket before it is upgraded, so a failure there happens
-    // while the caller's address is the thing in scope.
     let failures = 0;
     const server = startRelay({
       port: 0,
@@ -671,8 +667,6 @@ describe("writing nothing", () => {
     try {
       const port = portOf(server);
 
-      // 429, the relay's own refusal — not the 500 Bun answers for a handler
-      // that threw, which it prints a stack trace alongside.
       expect((await fetch(`http://127.0.0.1:${port}/`)).status).toBe(429);
       await expect(openSocket(port)).rejects.toThrow("refused");
 
@@ -683,9 +677,6 @@ describe("writing nothing", () => {
   });
 
   it("keeps answering the sender when the caller's onError throws", async () => {
-    // `onError` is the caller's code, so it is the one thing in the failure
-    // path this file cannot vouch for. A throw from it inside the handler's
-    // catch escapes to Bun exactly like the one the catch was added to stop.
     let clockBroken = false;
     const server = startRelay({
       port: 0,
@@ -706,12 +697,9 @@ describe("writing nothing", () => {
       await until(() => framesOfType(client, "err").length === 1);
       clockBroken = false;
 
-      // Answering the sender and reporting the failure are independent: losing
-      // the second does not cost the first.
       expect(framesOfType(client, "err")).toEqual([{ v: 2, t: "err", code: "bad_frame" }]);
       expect(client.isOpen()).toBe(true);
 
-      // And the relay is still a relay afterwards.
       const listener = await subscribed(HANDLE, portOf(server));
       client.send(msgFrame(HANDLE, 1, CIPHERTEXT));
       await until(() => framesOfType(listener, "msg").length === 1);

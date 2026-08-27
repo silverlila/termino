@@ -17,6 +17,15 @@ import {
  * It has no access to a key and no way to obtain one, so "the relay cannot
  * read your messages" is a property of the import graph rather than a promise
  * — `bun run check:relay-pure` fails the build if that ever stops being true.
+ *
+ * Three things about Bun decide the shape of what follows. An exception that
+ * escapes a fetch or socket handler is printed with a stack trace, and the
+ * frame, the handle and the sender's address are all in scope when it happens,
+ * so nothing here may let one out. `undefined` returned from fetch is how Bun
+ * is told the upgrade handshake was the response; every other path answers with
+ * a Response. And a browser attaches an Origin header to a WebSocket handshake
+ * where the CLI never does, so an Origin arriving at all means a browser page
+ * is driving the socket.
  */
 
 export const DEFAULT_PORT = 8787;
@@ -117,8 +126,6 @@ export function startRelay(options: RelayOptions = {}) {
     port: options.port ?? DEFAULT_PORT,
 
     fetch(request) {
-      // `now` is injectable and fallible, and this is one of its two call
-      // sites: a clock that throws here would take the whole request with it.
       try {
         return admitRequest(request);
       } catch {
@@ -134,10 +141,6 @@ export function startRelay(options: RelayOptions = {}) {
         try {
           route(ws, raw);
         } catch {
-          // Answering the sender and telling the caller are attempted
-          // separately, so a failure in one still leaves the other done, and
-          // neither may throw: `onError` is the caller's code and `ws.send`
-          // depends on a socket that may be closing.
           attempt(() => reject(ws, "bad_frame"));
           attempt(onError);
         }
@@ -222,16 +225,11 @@ export function startRelay(options: RelayOptions = {}) {
     else openPerSource.delete(source);
   }
 
-  /** Parse, charge, act — in that order, for every frame type alike. */
   function route(ws: Bun.ServerWebSocket<Connection>, raw: string | Buffer): void {
     const frame = parse(raw);
 
     if (frame === null) return reject(ws, "bad_frame");
 
-    // Every frame the relay acts on costs a token, not just `msg`. A `sub`
-    // is cheap to send and expensive to serve, so charging only `msg` left
-    // a client free to toggle between two handles and make the relay do
-    // subscription work for nothing.
     const limit = takeToken(ws.data.bucket, now());
     ws.data.bucket = limit.bucket;
     if (!limit.allowed) return reject(ws, "rate_limited");

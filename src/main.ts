@@ -343,10 +343,6 @@ async function runServe(command: ServeCommand): Promise<void> {
 
   const server = startRelay({
     port: command.port,
-    // The relay reports the bare fact of a failure and nothing else — the
-    // callback takes no arguments, so nothing about a connection can travel
-    // out with it. Announcing it belongs here because this file is the only
-    // one on the relay's path permitted to write.
     onError: () => process.stderr.write("termino relay: a connection failed\n"),
   });
   stdout.write(`termino relay listening on ws://localhost:${server.port}\n`);

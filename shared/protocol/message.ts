@@ -18,6 +18,13 @@ import { bodyProblem, nickProblem } from "./text.ts";
  * There is no timestamp either. Nothing trusted the sender's clock even when
  * one was carried; the receiver's arrival time is the only clock it can vouch
  * for.
+ *
+ * No error path here may `JSON.stringify` a value it is rejecting. `stringify`
+ * recurses, so a deeply nested payload costs the receiver real time and then
+ * throws `RangeError` — inside the code whose only job was to refuse it, and
+ * out through a parser that promises to throw `PayloadError` and nothing else.
+ * `describe` names the shape instead. The two nested-* files under test/corpus
+ * hold that line.
  */
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
@@ -159,12 +166,6 @@ function readType(value: unknown): PayloadType {
   return known;
 }
 
-/**
- * Names a rejected value without serialising it. `JSON.stringify` recurses, so
- * a deeply nested value spends the receiver's stack — and, just short of that,
- * hundreds of milliseconds — inside the error that exists to reject it. Found
- * by `scripts/fuzz-long.ts`, which is why the corpus carries the two inputs.
- */
 function describe(value: unknown): string {
   if (typeof value === "object" && value !== null) {
     return Array.isArray(value) ? "an array" : "an object";

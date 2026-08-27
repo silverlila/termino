@@ -12,26 +12,6 @@ import { gapNotice } from "../src/tui/App.tsx";
 import { wait } from "./support/harness.ts";
 import { startMaliciousRelay, type MaliciousRelay } from "./support/malicious-relay.ts";
 
-/**
- * The client against the party the protocol is designed to defend against.
- *
- * Everywhere else in this suite the relay behaves and the peer is the problem.
- * Here the relay is the problem: it drops a message, holds two back and lets
- * them out in the wrong order, invents a frame, delivers one twice, stops
- * carrying traffic, and cuts bytes out of what it forwards.
- *
- * Every assertion is about something the person at the terminal is told,
- * because a client that handles a dropped message perfectly and says nothing
- * has failed. The session's callbacks are that surface — `src/tui/App.tsx`
- * turns each into one line, and the line each test means is named in a comment
- * beside it:
- *
- *   onGap          → `⚠ 1 message from alice never arrived`
- *   onDecryptError → `could not open N messages — someone may be sending noise`,
- *                    one line rewritten in place rather than one per frame
- *   onPeerGone     → the status bar stops saying the peer is here
- */
-
 const PSK = generatePsk();
 const HANDLE = deriveHandle(PSK);
 
@@ -39,8 +19,6 @@ const HANDLE = deriveHandle(PSK);
  * types is 1, the second is 2, and a test can name the frame it means. */
 const FIRST_TEXT_COUNTER = 1;
 
-/** Presence, driven fast enough to watch. Everything else in this file runs on
- * the real fifteen and forty-five seconds, which never tick inside a test. */
 const QUICK_PING_MS = 20;
 const QUICK_EXPIRY_MS = 60;
 type Timings = Pick<SessionOptions, "pingIntervalMs" | "presenceExpiryMs">;
@@ -86,7 +64,6 @@ async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> 
   }
 }
 
-/** Long enough for anything in flight to land, before asserting absence. */
 const settle = () => wait(150);
 
 async function join(nick: string, timings: Timings): Promise<Peer> {
@@ -126,8 +103,6 @@ const bodiesSeenBy = (peer: Peer) => peer.got.messages.map((message) => message.
 const noticesSeenBy = (peer: Peer) =>
   peer.got.gaps.map(({ nick, count }) => gapNotice(nick, count));
 
-/** One bit of the ciphertext, turned over. The frame still decodes and the
- * base64 is still base64; it is the AEAD tag that no longer holds. */
 function flipOneBit(bytes: Uint8Array): Uint8Array {
   const corrupted = new Uint8Array(bytes);
   corrupted[0] = (corrupted[0] ?? 0) ^ 0x01;
@@ -146,9 +121,6 @@ afterEach(() => {
 
 describe("a relay that misbehaves", () => {
   it("drops a message", async () => {
-    // The second line alice types, and nothing else: a relay that swallowed
-    // the handshake would be a relay nobody could talk through at all, which
-    // is not an interesting attack.
     relay.policy.onFrame = (raw, from) => {
       const frame = decodeFrame(raw);
       const dropped = from === "a" && frame.t === "msg" && frame.i === FIRST_TEXT_COUNTER + 1;
@@ -182,8 +154,6 @@ describe("a relay that misbehaves", () => {
     await alice.session.send("two");
     await until(() => relay.held().length === 2);
 
-    // Delivered back to front. The key for the message that was stepped over
-    // is kept rather than discarded, which is what makes this cost nothing.
     relay.policy.hold = false;
     relay.release([1, 0]);
     await until(() => bob.got.messages.length === 2);
@@ -204,8 +174,6 @@ describe("a relay that misbehaves", () => {
     await alice.session.send("one");
     await until(() => bob.got.messages.length === 1);
 
-    // A frame the relay wrote itself, at the counter alice's next line will
-    // carry. It holds no key, so the ciphertext is noise.
     const forged = msgFrame(HANDLE, FIRST_TEXT_COUNTER + 1, crypto.getRandomValues(new Uint8Array(64)));
     relay.inject(encodeFrame(forged), "b");
     await until(() => bob.got.decryptErrors.length === 1);
@@ -241,15 +209,10 @@ describe("a relay that misbehaves", () => {
     const replayed = captured[0];
     if (replayed === undefined) throw new Error("the relay captured nothing to replay");
 
-    // The same bytes a second time. A counter is serviced exactly once, so
-    // the key that opened it no longer exists — which is what replaces a
-    // replay window, a set of delivered messages, and any dependence on
-    // either machine's clock.
     relay.inject(replayed, "b");
     await until(() => bob.got.decryptErrors.length === 1);
     await settle();
 
-    // Nothing appeared twice, and the conversation carries on.
     expect(bodiesSeenBy(bob)).toEqual(["one"]);
     await alice.session.send("two");
     await until(() => bob.got.messages.length === 2);
@@ -262,8 +225,6 @@ describe("a relay that misbehaves", () => {
 
     const cutAt = Date.now();
     relay.policy.partition = "both";
-
-    // Not on the first ping that failed to arrive: presence is said from the
     // peer's own payloads, and a whole expiry of silence is what ends it.
     expect(alice.got.gone).toBe(0);
     await until(() => alice.got.gone === 1 && bob.got.gone === 1);
@@ -276,8 +237,6 @@ describe("a relay that misbehaves", () => {
       const frame = decodeFrame(raw);
       if (from !== "a" || frame.t !== "msg") return raw;
 
-      // One line has its ciphertext turned over, the next is cut short on the
-      // wire. The first fails the AEAD tag, the second never decodes at all.
       if (frame.i === FIRST_TEXT_COUNTER) {
         return encodeFrame(msgFrame(frame.h, frame.i, flipOneBit(fromBase64(frame.c))));
       }
@@ -293,8 +252,6 @@ describe("a relay that misbehaves", () => {
     await alice.session.send("two");
     await until(() => bob.got.decryptErrors.length === 2);
 
-    // Neither crashed the client: the next line opens as though nothing had
-    // happened.
     await alice.session.send("three");
     await until(() => bob.got.messages.length === 1);
 

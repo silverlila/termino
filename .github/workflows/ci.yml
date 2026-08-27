@@ -1,7 +1,5 @@
 name: CI
 
-# The whole Verification block, on every push. Nothing here needs a Docker
-# daemon, a hosting account or a signing key — that is deliberate.
 on: push
 
 jobs:
@@ -10,8 +8,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned, not `latest`: bun.lock pins pre-1.0 OpenTUI builds, and a
-      # floating runtime undoes that pinning from underneath.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.18
@@ -34,5 +30,4 @@ jobs:
       - run: bun run check:no-persistence
       - run: bun run check:unaudited
 
-      # A shared runner is the slow machine the README's timeout note is about.
       - run: bun test --timeout 30000

@@ -1,45 +1,28 @@
-/**
- * Fuzzes the two parsers that read fully attacker-controlled bytes.
- *
- * `decodeFrame` runs in the relay and in the client on anything a socket
- * delivers, and `parsePayload` runs on whatever a message turns out to contain
- * once it is decrypted. Nothing authenticates either input before it arrives, so
- * this is where the reachable bugs are; the AEAD and the ratchet only ever see
- * bytes that are already authenticated or locally generated.
- *
- * Neither parser may throw anything but its own declared error — `FrameError`,
- * `PayloadError` — and neither may take long enough on one input to look like a
- * hang. `openMessage` is deliberately not a target: it is documented to throw
- * `DecryptError` and `PaddingError` as well, so "only the parser's error
- * escapes" would fail there on correct behaviour.
- *
- * `test/shared/protocol/fuzz.test.ts` imports `fuzz` for a short budget inside
- * the suite; this file's command line runs a long one for somebody to leave
- * going. Both drive the same targets through the same generators.
- *
- *   bun run scripts/fuzz-long.ts --budget 60 [--seed 1234]
- */
-
 import { decodeFrame, FrameError, toBase64 } from "../shared/protocol/frame.ts";
 import { parsePayload, PayloadError } from "../shared/protocol/message.ts";
 
 /**
- * No single input may spend longer than this in a parser. The bound is per
- * input rather than per run on purpose: a suite timeout cannot tell one input
- * that hangs from a thousand that are merely slow, and it is raised on a slow
- * machine anyway (`bun test --timeout 30000`), which would take the hang check
- * with it.
+ * Generates hostile input for the two parsers and reports anything that throws
+ * something other than its own declared error, or takes longer than
+ * `MAX_PARSE_MS` to refuse.
+ *
+ * Three platform facts shape the generators. Bun hands a WebSocket handler a
+ * `Buffer` rather than a string for a binary message, so `decodeFrame`'s byte
+ * path is reachable from the wire and gets a target of its own.
+ * `Buffer.from(text, "base64")` drops characters outside the alphabet instead of
+ * refusing them, so a corrupted invite decodes to something plausible rather
+ * than failing. And spreading a string iterates code points where `split("")`
+ * does not — the alphabet is spread so no generated input carries a lone
+ * surrogate the parsers were never meant to see.
  */
+
 export const MAX_PARSE_MS = 50;
 
-/** Stops a run once it has this many findings. The point is to report the first
- * ones with their inputs, not to spend the rest of the budget on duplicates. */
 const MAX_FINDINGS = 5;
 
 export interface Target {
   readonly name: string;
   parse(input: string): void;
-  /** True for the one error type this parser is allowed to throw. */
   declaresError(error: unknown): boolean;
 }
 
@@ -76,7 +59,6 @@ export const TARGETS: readonly Target[] = [frameTarget, frameBytesTarget, payloa
 
 export interface Finding {
   readonly target: string;
-  /** The generator or corpus file the input came from. */
   readonly source: string;
   readonly input: string;
   readonly problem: string;
@@ -132,18 +114,12 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** One line naming the parser, the problem and the input that caused it. The
- * input is truncated, because a finding may be a megabyte long. */
 export function describeFinding(finding: Finding): string {
   const preview = JSON.stringify(finding.input.slice(0, 300));
   const rest = finding.input.length > 300 ? ` … (${finding.input.length} chars)` : "";
 
   return `${finding.target} ${finding.problem} — from ${finding.source}: ${preview}${rest}`;
 }
-
-// ---------------------------------------------------------------------------
-// Generators
-// ---------------------------------------------------------------------------
 
 type Random = () => number;
 
@@ -152,9 +128,7 @@ interface Generator {
   produce(random: Random): string;
 }
 
-/** Seeded rather than `Math.random`, so a finding can be reproduced from the
- * seed the run reports. */
-export function randomFrom(seed: number): Random {
+function randomFrom(seed: number): Random {
   let state = seed >>> 0;
 
   return () => {
@@ -191,8 +165,6 @@ const VALID: readonly Record<string, unknown>[] = [
   { t: "confirm", nick: "alice" },
 ];
 
-/** What one field of an otherwise valid frame or payload gets replaced with:
- * values JSON can carry that the parser must refuse rather than believe. */
 const HOSTILE_VALUES: readonly unknown[] = [
   null,
   true,
@@ -264,8 +236,6 @@ function fieldRemoved(random: Random): string {
   return JSON.stringify(mutated);
 }
 
-/** Byte-level damage to something that was well formed: what a relay that
- * rewrites frames, or a lossy path, actually produces. */
 function editedEncoding(random: Random): string {
   let text = JSON.stringify(pick(random, VALID));
   const edits = between(random, 1, 4);
@@ -345,14 +315,8 @@ function corruptedBase64(random: Random): string {
   return JSON.stringify({ ...base, [field]: corrupted });
 }
 
-// ---------------------------------------------------------------------------
-// The run
-// ---------------------------------------------------------------------------
-
 export interface FuzzOptions {
   readonly budgetMs: number;
-  /** Omitted, a seed is drawn and reported, so a run explores rather than
-   * replaying the same inputs the last one already cleared. */
   readonly seed?: number;
   readonly targets?: readonly Target[];
 }
@@ -363,9 +327,6 @@ export interface FuzzReport {
   readonly findings: readonly Finding[];
 }
 
-/** Generates until the budget runs out, driving every case through every
- * target. Budgeted in time rather than iterations so a slow machine runs fewer
- * cases instead of taking longer. */
 export function fuzz(options: FuzzOptions): FuzzReport {
   const seed = options.seed ?? Math.floor(Math.random() * 0xffffffff);
   const targets = options.targets ?? TARGETS;
@@ -390,8 +351,7 @@ export function fuzz(options: FuzzOptions): FuzzReport {
 
 const USAGE = "usage: bun run scripts/fuzz-long.ts --budget <seconds> [--seed <n>]";
 
-/** The shell: the only part of this file that reads argv, prints or exits. */
-export function runCli(argv: string[]): number {
+function runCli(argv: string[]): number {
   const budgetSeconds = readNumber(argv, "--budget");
   const seed = readNumber(argv, "--seed");
 

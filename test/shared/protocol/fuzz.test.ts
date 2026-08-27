@@ -17,24 +17,8 @@ import {
   TARGETS,
 } from "../../../scripts/fuzz-long.ts";
 
-/**
- * A parser is the one part of this protocol that reads bytes nothing has
- * authenticated. `decodeFrame` must throw `FrameError` and nothing else,
- * `parsePayload` must throw `PayloadError` and nothing else, and neither may
- * spend long enough on a single input to look like a hang — a relay that can
- * make a client throw a `RangeError` has found a way to end the conversation,
- * and one that can make it stall has found a way to stop it.
- */
-
-/** A few seconds per target, budgeted in time rather than iterations: a slow
- * machine then runs fewer cases instead of taking longer, which keeps CI
- * wall-clock predictable. The long run behind `scripts/fuzz-long.ts` is where
- * a bigger budget belongs. */
 const SUITE_BUDGET_MS = 1_500;
 
-/** The seed is drawn per run rather than pinned, so the suite keeps exploring
- * new inputs instead of re-clearing the ones it cleared yesterday; the corpus
- * is what makes the interesting ones permanent. */
 function expectNoFindings(report: FuzzReport): void {
   // The seed rides along inside the assertion so a failure names the run that
   // produced it — `--seed <n>` replays it exactly.
@@ -75,7 +59,6 @@ describe("fuzzing parsePayload", () => {
 });
 
 describe("the committed corpus", () => {
-  // `.txt` only: a stray `.DS_Store` is not a regression case.
   const CORPUS_DIR = join(import.meta.dir, "..", "..", "corpus");
   const files = readdirSync(CORPUS_DIR)
     .filter((name) => name.endsWith(".txt"))

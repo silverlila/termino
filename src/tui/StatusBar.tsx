@@ -38,18 +38,7 @@ export function stateLabel(connection: ConnectionState, peerPresent: boolean): s
   return peerPresent ? "connected · both here" : "connected · the other side has gone quiet";
 }
 
-/**
- * The first thing on the first screen, and it stays there for the whole
- * session.
- *
- * Nobody outside this project has reviewed the way these primitives were
- * assembled into a protocol, and assembly is where the mistakes live. A note in
- * a README is read once by the person who installed it, which is not the same
- * person as the one deciding what to type — so the claim is repeated where the
- * typing happens, and it names the document that says what is and is not
- * defended.
- */
-export const UNAUDITED_BANNER = "⚠ unaudited — no external security review; see THREAT-MODEL.md";
+const UNAUDITED_BANNER = "⚠ unaudited — no external security review; see THREAT-MODEL.md";
 
 export const SAS_LABEL = "session words:";
 
