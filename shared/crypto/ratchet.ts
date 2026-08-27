@@ -1,45 +1,27 @@
+/**
+ * The symmetric ratchet: message keys by counter, with a bounded cache for messages that
+ * arrive out of order.
+ *
+ * AES-256-GCM (seal.ts, via WebCrypto) takes a 32-byte key and a 12-byte nonce; both are
+ * cut from one 44-byte HKDF output here. seal.ts declares neither size.
+ *
+ * `nextKey` zeroes the chain buffer it was handed, so callers must assign the returned
+ * chain over the one they passed. Zeroing is best-effort: nothing in JavaScript can reach
+ * a copy the engine made, so `fill(0)` bounds how long a key is readable and guarantees
+ * nothing more.
+ */
+
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
-/**
- * The symmetric ratchet: one key per message, deleted once it has been used.
- *
- * A chain key hashes forward into the key for the next message and into its
- * own successor, and nothing hashes backward. From chain #5 a holder reaches
- * #6, #7, #8 forever and no arithmetic returns them to #4, so a key taken off
- * a running session opens the rest of it and nothing that came before. The old
- * key is not hidden — after `nextKey` it does not exist anywhere.
- *
- * The relay is not a reliable ordered channel: it can drop, reorder or
- * withhold. So a receiver handed a counter beyond the one it expected derives
- * the keys it stepped over and keeps them, rather than wedging the session on
- * one lost frame. Both of the bounds below exist because that cache is
- * something a hostile peer would otherwise grow for free.
- */
-
-/** Distinct labels so the message key and the next chain key cannot collide. */
 const MESSAGE_KEY_LABEL = "termino/mk/v2";
 const CHAIN_KEY_LABEL = "termino/ck/v2";
 
-/** Matches the chain keys the handshake hands out. */
 const CHAIN_BYTES = 32;
 
-/** AES-256-GCM: a 32-byte key and a 12-byte nonce, derived together as 44
- * bytes of one HKDF output. The nonce is derived rather than sent because the
- * key is used exactly once — deriving it costs nothing, removes 12 bytes from
- * every frame, and is safe in a way an all-zero nonce would stop being the
- * moment anything ever reused a key. */
 const MESSAGE_KEY_BYTES = 32;
 const NONCE_BYTES = 12;
 
-/**
- * The most messages a single jump may skip, and the most keys the cache holds.
- * One maximal jump therefore fills the cache exactly.
- *
- * A bound is not optional: without the first, a peer sending counter 2³¹ makes
- * the receiver derive two billion keys; without the second, a peer sending
- * 256, 512, 768… accumulates keys for as long as the session runs.
- */
 export const MAX_SKIP = 256;
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
@@ -50,22 +32,11 @@ export interface MessageKey {
 }
 
 export interface Advance extends MessageKey {
-  /** The chain to use next. The chain passed in has been zeroed. */
   chain: Uint8Array;
 }
 
-/** Thrown when a counter cannot be serviced. Every case is a lost, replayed or
- * hostile frame, and each one is announced rather than dropped quietly. */
 export class RatchetError extends Error {}
 
-/**
- * Derives the key and nonce for one message and advances the chain.
- *
- * **Zeroes the chain it is given.** That mutation is the point: a chain key
- * left lying around recomputes every message key after it, so the caller is
- * given no way to keep using the old one by accident. Assign the returned
- * `chain` over it.
- */
 export function nextKey(chain: Uint8Array): Advance {
   if (chain.length !== CHAIN_BYTES) {
     throw new RatchetError(`a chain key is ${CHAIN_BYTES} bytes, got ${chain.length}`);
@@ -89,33 +60,11 @@ export function nextKey(chain: Uint8Array): Advance {
 }
 
 export interface ReceivingChain {
-  /** The key and nonce for one arriving counter. Throws `RatchetError` rather
-   * than returning a key that would open the wrong message. */
   take(counter: number): MessageKey;
-  /** Counters whose keys are cached and whose messages have not arrived,
-   * lowest first — the open gaps, which is what a "never arrived" notice
-   * counts. */
   skipped(): number[];
-  /**
-   * Zeroes the chain and every cached key. Nothing may be taken afterwards.
-   *
-   * Returns the buffers it overwrote, every one of them now all zeros. The
-   * cache is private, so without this "the keys are gone" would be a claim
-   * about state nothing outside can look at — and a security claim nobody can
-   * check is one nobody should believe.
-   */
   wipe(): Uint8Array[];
 }
 
-/**
- * The receiving half of one direction: a chain key, a counter, and the keys
- * for messages that were stepped over and may still turn up.
- *
- * A counter is serviced exactly once. That is what replaces replay protection
- * outright — a second copy of a message finds no key left to open it, so there
- * is no window to keep, no set of delivered signatures, and no dependence on
- * either machine's clock.
- */
 export function startReceiving(chain: Uint8Array): ReceivingChain {
   if (chain.length !== CHAIN_BYTES) {
     throw new RatchetError(`a chain key is ${CHAIN_BYTES} bytes, got ${chain.length}`);
@@ -125,9 +74,6 @@ export function startReceiving(chain: Uint8Array): ReceivingChain {
   let nextCounter = 0;
   let wiped = false;
 
-  // Insertion is always in ascending counter order, so the map's own order is
-  // the gap order: the oldest entry is the first key, which is the one
-  // eviction drops.
   const cache = new Map<number, MessageKey>();
 
   function advance(): MessageKey {
@@ -167,9 +113,6 @@ export function startReceiving(chain: Uint8Array): ReceivingChain {
       throw new RatchetError(`message ${counter} has already been delivered, or its key is gone`);
     }
 
-    // Ahead of what the chain has reached by more than the cache can hold. A
-    // real gap this large means the messages are unrecoverable anyway; a
-    // counter of 2³¹ means somebody is asking for two billion derivations.
     if (counter - nextCounter > MAX_SKIP) {
       throw new RatchetError(
         `message ${counter} is more than ${MAX_SKIP} ahead of ${nextCounter} and cannot be opened`,
@@ -203,8 +146,6 @@ export function startReceiving(chain: Uint8Array): ReceivingChain {
   return { take, skipped, wipe };
 }
 
-/** Best-effort: it overwrites the buffer we hold and cannot reach a copy the
- * engine made. It still bounds how long the key is readable. */
 function wipeKey(messageKey: MessageKey | undefined): void {
   messageKey?.key.fill(0);
   messageKey?.nonce.fill(0);

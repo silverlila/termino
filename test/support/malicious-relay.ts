@@ -1,24 +1,18 @@
-import { decodeFrame } from "../../shared/protocol/frame.ts";
-
 /**
- * A relay that misbehaves on purpose. It forwards between exactly two clients
- * and does whatever `policy` says to each frame on the way through, so a test
- * can put the client in front of a hostile network without a hostile peer.
+ * A relay that misbehaves on purpose: it forwards between exactly two clients and does
+ * whatever `policy` says to each frame on the way through.
  *
- * Bun wants the per-connection data at `server.upgrade`, before any socket
- * exists, but a side can only be claimed once one does — which is why `side`
- * starts null and is assigned in `open`.
+ * Bun.serve fixes per-connection data at `server.upgrade`, before any socket exists, so
+ * `side` is null until `open` assigns it.
  */
 
-/** Which of the two connections a frame came from. Assigned in connection
- * order, so a test that means "everything alice sends" starts alice first. */
+import { decodeFrame } from "../../shared/protocol/frame.ts";
+
 type Side = "a" | "b";
 
 type Partition = "none" | "both";
 
 interface RelayPolicy {
-  /** Return null to drop, a different string to rewrite, or `raw` unchanged.
-   *  Frames travel as JSON strings — `encodeFrame` is `JSON.stringify`. */
   onFrame?(raw: string, from: Side): string | null;
   hold?: boolean;
   partition?: Partition;
@@ -27,10 +21,6 @@ interface RelayPolicy {
 export interface MaliciousRelay {
   url: string;
   policy: RelayPolicy;
-  /** How many clients are connected. Both sides of a v2 session block until
-   * the other answers, so a test starts them together — this is how it waits
-   * for the first one to arrive before starting the second, which is what
-   * makes `"a"` a known person rather than whichever socket won the race. */
   connections(): number;
   held(): readonly string[];
   release(indexes: number[]): void;
@@ -39,7 +29,6 @@ export interface MaliciousRelay {
 }
 
 interface Connection {
-  /** Null only between the upgrade and `open`, which nothing reads. */
   side: Side | null;
 }
 
@@ -88,15 +77,6 @@ export function startMaliciousRelay(): MaliciousRelay {
     return null;
   }
 
-  /**
-   * One frame, from one client.
-   *
-   * A subscription is addressed to the relay itself and is read before the
-   * policy sees it, exactly as the honest relay consumes `sub` rather than
-   * forwarding it — otherwise a policy that corrupts everything would put a
-   * frame on the wire that no relay ever sends, and the client would be being
-   * tested against a case that cannot happen.
-   */
   function route(from: Side | null, raw: string): void {
     if (from === null || isSubscription(raw)) return;
 

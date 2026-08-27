@@ -1,14 +1,12 @@
-/** AES-GCM is used for the AEAD guarantee, not merely for confidentiality:
- * tampering with a sealed message must fail loudly rather than silently
- * producing altered plaintext. WebCrypto is built into Bun, so this costs no
- * dependency.
+/**
+ * AES-GCM sealing and opening.
  *
- * The nonce is a parameter rather than something generated here. Every key this
- * module is handed comes from the ratchet and is used for exactly one message,
- * and its nonce is derived alongside it — so the same key and nonce arriving
- * twice is a bug upstream, not something to paper over with fresh randomness. */
+ * WebCrypto refuses SharedArrayBuffer-backed buffers — `NodeJS.BufferSource` excludes
+ * them — so every key, nonce and payload is copied into a fresh non-shared Uint8Array
+ * before it crosses into crypto.subtle: one memcpy per message. `view` therefore returns
+ * a copy, not a view.
+ */
 
-/** Thrown when a message cannot be authenticated: wrong key, or tampering. */
 export class DecryptError extends Error {
   constructor(cause: unknown) {
     super("message failed to decrypt: wrong key or tampered ciphertext");
@@ -16,12 +14,6 @@ export class DecryptError extends Error {
   }
 }
 
-/**
- * WebCrypto's parameters are typed as ArrayBuffer-backed views, while a plain
- * `Uint8Array` is typed over `ArrayBufferLike` — which also admits
- * `SharedArrayBuffer`, on which WebCrypto refuses to operate. Copying into a
- * fresh view satisfies that at the boundary; it costs one memcpy per message.
- */
 function view(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(bytes);
 }
@@ -49,8 +41,6 @@ export async function seal(
   return new Uint8Array(ciphertext);
 }
 
-/** Throws DecryptError if the ciphertext does not authenticate. Never returns
- * altered plaintext. */
 export async function open(
   messageKey: Uint8Array,
   nonce: Uint8Array,

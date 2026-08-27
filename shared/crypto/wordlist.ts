@@ -1,20 +1,3 @@
-/**
- * The 256 words a fingerprint is spoken in. Byte value N maps to WORDLIST[N].
- *
- * Authored for this project subject to three constraints, all enforced by
- * fingerprint.test.ts:
- *
- *   - 4 to 7 letters, lowercase ASCII
- *   - no two words share a 3-letter prefix
- *   - no two words are within a Levenshtein distance of 1
- *
- * The last two are the point. A fingerprint is read aloud over a voice call to
- * confirm a peer's key, so a misheard or mistyped word must fail to match
- * anything rather than quietly matching a neighbour.
- *
- * This list is part of the user-facing contract: reordering it changes every
- * fingerprint ever displayed, and a known-answer test pins it.
- */
 export const WORDLIST: readonly string[] = [
   "acorn", "agent", "alert", "alpha", "angle", "apple", "armor", "aspen",
   "audio", "award", "badge", "bamboo", "basil", "birch", "black", "bloom",

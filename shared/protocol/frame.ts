@@ -1,36 +1,24 @@
 /**
- * The outer frame: everything the relay is allowed to see. A handle to route
- * on, and an opaque blob to forward.
+ * The outer frame: what the relay can see. Nothing here is derived from plaintext.
  *
- * This module must never import from `shared/crypto/`. The relay imports it, and
- * "the relay cannot decrypt" is meant to be a structural fact rather than a
- * promise — `bun run check:relay-pure` covers this directory as well as
- * `server/`, so the rule is enforced rather than merely written down here.
+ * Node/Bun's `Buffer.from(text, "base64")` silently drops characters outside the alphabet
+ * instead of failing, so every base64 field is shape-checked before it is decoded.
+ *
+ * The version check runs before any other field is inspected.
  */
 
-/** Bumped only for a breaking change. Unknown versions are rejected, not ignored. */
 export const PROTOCOL_VERSION = 2;
 
-/** A frame larger than this is dropped before it is parsed. The plaintext is
- * padded to at most 4096 bytes, which base64s to roughly 5.5 KB once the tag
- * and the envelope are counted — so anything approaching 8 KiB is an
- * amplification attempt rather than a message. Written out rather than
- * imported: this module may not depend on `shared/crypto/`. */
 export const MAX_FRAME_BYTES = 8192;
 
-/** An X25519 public key, as it rides in a `hello`. Written out rather than
- * imported for the same reason: the relay's dependency cone stops here. The
- * handshake checks the length again before it uses the key. */
 const PUBLIC_KEY_BYTES = 32;
 
-/** Message counters are 32-bit unsigned. A counter beyond this is a malformed
- * frame rather than a very long conversation. */
 const MAX_COUNTER = 0xffffffff;
 
 const HANDLE_PATTERN = /^[0-9a-f]{32}$/;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
 
-export const ERROR_CODES = [
+const ERROR_CODES = [
   "rate_limited",
   "bad_frame",
   "not_subscribed",
@@ -38,62 +26,38 @@ export const ERROR_CODES = [
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
-/** Client → relay, the first frame on a connection. */
 export interface SubFrame {
   v: typeof PROTOCOL_VERSION;
   t: "sub";
   h: string;
 }
 
-/**
- * Client → relay → the other subscriber. The ephemeral public key travels in
- * the clear because there is no key yet; an eavesdropper without the
- * pre-shared key learns two public keys and can do nothing with them.
- */
 export interface HelloFrame {
   v: typeof PROTOCOL_VERSION;
   t: "hello";
-  /** Handle: 32 lowercase hex characters. */
   h: string;
-  /** Base64 32-byte X25519 public key. */
   k: string;
 }
 
-/** Client → relay → every other subscriber to the same handle. */
 export interface MsgFrame {
   v: typeof PROTOCOL_VERSION;
   t: "msg";
   h: string;
-  /** The sender's counter on its own chain. In the clear: the relay already
-   * sees how many messages moved and when, and the receiver needs it to derive
-   * the right key and to notice a gap. */
   i: number;
-  /** Base64 AES-GCM ciphertext. The relay forwards this byte for byte. There
-   * is no nonce field — the nonce is derived from the chain. */
   c: string;
 }
 
-/** Relay → one client. Never broadcast. */
 export interface ErrFrame {
   v: typeof PROTOCOL_VERSION;
   t: "err";
   code: ErrorCode;
 }
 
-/** The three frames a client may send. */
 export type ClientFrame = SubFrame | HelloFrame | MsgFrame;
-/** The only frame the relay originates. It carries nothing derived from
- * ciphertext, because the relay has nothing to derive it from. */
-export type RelayFrame = ErrFrame;
-export type Frame = ClientFrame | RelayFrame;
+export type Frame = ClientFrame | ErrFrame;
 
-/**
- * Thrown by `decodeFrame`. The relay catches this and answers `bad_frame`
- * rather than closing the connection: one malformed frame is a bug or a probe,
- * not a reason to disconnect somebody mid-conversation.
- */
 export class FrameError extends Error {
-  constructor(readonly reason: string) {
+  constructor(reason: string) {
     super(`invalid frame: ${reason}`);
   }
 }
@@ -102,12 +66,6 @@ export function toBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64");
 }
 
-/**
- * `Buffer.from(text, "base64")` silently discards characters outside the
- * alphabet, so a corrupt public key would decode to a plausible-looking short
- * one. The shape is checked first so corruption fails here instead of
- * surfacing as a handshake or decryption error later.
- */
 export function fromBase64(text: string): Uint8Array {
   if (!BASE64_PATTERN.test(text)) throw new FrameError("not valid base64");
   return new Uint8Array(Buffer.from(text, "base64"));
@@ -133,17 +91,10 @@ export function encodeFrame(frame: Frame): string {
   return JSON.stringify(frame);
 }
 
-/** True for the frames a relay accepts. The relay drops `err` arriving from a
- * client: it originates that one, it never receives it. */
 export function isClientFrame(frame: Frame): frame is ClientFrame {
   return frame.t === "sub" || frame.t === "hello" || frame.t === "msg";
 }
 
-/**
- * Parses and fully validates one frame off the wire. Throws `FrameError` on
- * anything malformed; a returned frame is safe for the caller to use without
- * further checking.
- */
 export function decodeFrame(raw: string | Uint8Array): Frame {
   const size = typeof raw === "string" ? Buffer.byteLength(raw, "utf8") : raw.byteLength;
   if (size > MAX_FRAME_BYTES) throw new FrameError(`larger than ${MAX_FRAME_BYTES} bytes`);
@@ -163,8 +114,6 @@ export function decodeFrame(raw: string | Uint8Array): Frame {
 
   const fields = parsed as Record<string, unknown>;
 
-  // Checked before anything else about the body, so that a future version can
-  // change every other field freely.
   if (fields.v !== PROTOCOL_VERSION) {
     throw new FrameError(`unsupported version ${JSON.stringify(fields.v)}`);
   }

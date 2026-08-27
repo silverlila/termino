@@ -1,46 +1,29 @@
-import { pskToWords, wordsToPsk } from "../crypto/psk.ts";
-
 /**
- * The invite: the single token one person hands another, carrying both halves
- * of what is needed to talk — the secret and where to meet.
+ * The invite: `<16 hyphen-joined words>@<host[:port]>`, carried out of band.
  *
- * ```
- * acorn-yoga-...-tank@relay.example:8787
- * ```
+ * The scheme is not part of the token, so a parsed invite always dials wss://host/ — an
+ * invite minted against one scheme cannot be redeemed against another.
  *
- * `termino join ` is the command a person types in front of it, not part of
- * the token, and `parseInvite` does not accept it. One token is the point:
- * two things to copy across is one thing to get wrong, and a mismatched relay
- * fails as silence rather than as an error.
- *
- * This module imports crypto and so must never be reached from `server/` or
- * `shared/protocol/frame.ts` — `bun run check:relay-pure` enforces that the
- * relay's imports stop at `frame.ts`.
+ * This file imports psk.ts, so the relay's dependency cone must never reach it.
  */
+
+import { pskToWords, wordsToPsk } from "../crypto/psk.ts";
 
 export interface Invite {
   psk: Uint8Array;
-  /** The URL to dial, canonically `wss://host[:port]/`. */
   relay: string;
 }
 
 export class InvalidInviteError extends Error {
-  constructor(readonly reason: string) {
+  constructor(reason: string) {
     super(`invalid invite: ${reason}`);
   }
 }
 
-/**
- * The scheme is not carried in the token. Only the host survives, and reading
- * it back always yields `wss://`, so a token minted against one scheme cannot
- * be redeemed against another without somebody noticing.
- */
 export function formatInvite(psk: Uint8Array, relayUrl: string): string {
   return `${pskToWords(psk)}@${hostOf(relayUrl)}`;
 }
 
-/** Throws naming what is wrong: the word count found, the offending word, or
- * the missing host. A person retyping an invite needs to know which. */
 export function parseInvite(text: string): Invite {
   const token = text.trim();
 
@@ -68,12 +51,6 @@ function hostOf(relayUrl: string): string {
   return parsed.host;
 }
 
-/**
- * A host and an optional port, and nothing else. Anything a URL would absorb
- * into a path, a query or a userinfo section is rejected rather than quietly
- * dropped, so `...@evil.example/relay.example` cannot read as the host the
- * eye picks out of it.
- */
 function hostAsWritten(hostPart: string): string {
   let parsed: URL;
   try {

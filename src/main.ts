@@ -1,16 +1,27 @@
+/**
+ * The CLI: argument parsing, help, invite minting, relay URL resolution, and process
+ * wiring for the TUI.
+ *
+ * A URL's hostname keeps the brackets on an IPv6 literal: loopback is "[::1]", never
+ * "::1". No CA issues a certificate for localhost, so wss://localhost cannot be dialled
+ * at all — a loopback relay is reached over ws://.
+ *
+ * @opentui/react reads DEV at module evaluation: on "true" it loads react-devtools-core,
+ * which serialises the element tree to a WebSocket on localhost. DEV is cleared before
+ * that import.
+ */
+
 import { stdin, stdout } from "node:process";
 import * as readline from "node:readline/promises";
 import { nickProblem } from "../shared/protocol/text.ts";
 import type { SessionHandlers } from "./session.ts";
 
-export const DEFAULT_RELAY_PORT = 8787;
+const DEFAULT_RELAY_PORT = 8787;
 
-/** Printed to stderr, never to stdout: the invite itself is what gets piped or
- * copied, and a warning mixed into it would travel with it. */
 export const SCROLLBACK_WARNING =
   "this invite is now in your terminal scrollback — clear it once the other side has it";
 
-export const HELP = `termino — end-to-end encrypted terminal chat
+const HELP = `termino — end-to-end encrypted terminal chat
 
 Usage:
   termino new --relay <url> [--nick <name>]
@@ -49,15 +60,12 @@ export interface ServeCommand {
   port: number;
 }
 
-/** Mints a secret and prints the invite for it. */
 export interface NewCommand {
   mode: "new";
-  /** Prompted for on stdin when the flag is absent, as in v1. */
   nick?: string;
   relay: string;
 }
 
-/** Joins a channel somebody else's invite names. */
 export interface JoinCommand {
   mode: "join";
   nick?: string;
@@ -90,11 +98,6 @@ function parseServeArgs(argv: string[]): ServeCommand {
   return { mode: "serve", port };
 }
 
-/**
- * `--relay` is required rather than defaulted. A silent `ws://localhost:8787`
- * would mint invites that work on one machine and fail as silence everywhere
- * else, which is the failure mode the channel name was deleted to avoid.
- */
 function parseNewArgs(argv: string[]): NewCommand {
   const { values, switches } = readFlags(argv, ["--nick", "--relay"], ["--insecure"]);
 
@@ -118,10 +121,6 @@ function parseJoinArgs(argv: string[]): JoinCommand {
   return { mode: "join", nick: readNickFlag(values.get("--nick")), invite };
 }
 
-/** A nickname is drawn into the status bar and next to every line this client
- * sends, so the rule that protects the reader from a peer's nickname has to
- * protect them from their own too. It can arrive from a launch script, a
- * pasted command, or a prompt answered without reading it back. */
 function checkNick(nick: string, source: string): void {
   const problem = nickProblem(nick);
   if (problem !== null) throw new UsageError(`${source} is not usable: ${problem}`);
@@ -134,31 +133,16 @@ function readNickFlag(given: string | undefined): string | undefined {
   return given;
 }
 
-/** The other route in: a nickname typed at the prompt reaches the same status
- * bar, so it is held to the same rule. Exported because the caller that prompts
- * cannot be driven from a test — it reads stdin and ends in a renderer that
- * hangs without a TTY. */
 export function checkPromptedNick(nick: string): void {
   if (nick === "") throw new UsageError("a nickname is required");
   checkNick(nick, "the nickname");
 }
 
-/** Loopback carries no network an attacker can sit on. `URL.hostname` keeps
- * the brackets on an IPv6 literal, so `[::1]` is spelt that way here. */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 const SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-/**
- * The relay URL a client should dial, or a `UsageError` explaining why not.
- *
- * Message contents are encrypted whatever the transport, but nothing
- * authenticates the relay, so plain `ws://` over a real network lets an
- * attacker on the path drop or delay traffic silently. A mistyped scheme fails
- * here rather than inside the renderer, where the only symptom would be a
- * connection that never opens behind a full-screen interface.
- */
-export function resolveRelayUrl(given: string, insecure: boolean): string {
+function resolveRelayUrl(given: string, insecure: boolean): string {
   const withScheme = SCHEME_PATTERN.test(given) ? given : `wss://${given}`;
 
   let parsed: URL;
@@ -181,24 +165,6 @@ export function resolveRelayUrl(given: string, insecure: boolean): string {
   );
 }
 
-/**
- * The URL an invite is dialled on.
- *
- * An invite carries a host and deliberately no scheme, so `parseInvite` hands
- * back `wss://` — the only answer that is safe over a network nobody controls.
- * Loopback is the one host where that answer is not cautious but wrong: nothing
- * issues a certificate for `localhost`, so `wss://localhost` cannot be dialled
- * at all, and an invite naming it can only have come from the same machine.
- *
- * This is the same exemption `resolveRelayUrl` makes for `--relay`, read from
- * the other direction, and it is made here rather than in `parseInvite` for the
- * same reason the scheme is not in the token: which schemes this client will
- * dial is the client's policy, not the invite's.
- *
- * The alternative was an `--insecure` flag on `join`. It was rejected: it would
- * put a security-waiving flag on the ordinary path of trying termino out on one
- * machine, which teaches the habit of typing it.
- */
 export function inviteRelayUrl(fromInvite: string): string {
   const parsed = new URL(fromInvite);
   if (!LOOPBACK_HOSTS.has(parsed.hostname)) return fromInvite;
@@ -212,8 +178,6 @@ interface Flags {
   switches: Set<string>;
 }
 
-/** Flags are `--name value` pairs, except for the named value-less switches;
- * anything else is a usage error. */
 function readFlags(
   argv: string[],
   allowed: readonly string[],
@@ -255,29 +219,11 @@ async function promptLine(question: string): Promise<string> {
   }
 }
 
-/**
- * Loads the React renderer with `DEV` cleared.
- *
- * `@opentui/react` imports `react-devtools-core` at module evaluation time
- * when `DEV=true`, and devtools serialises the whole element tree — props
- * included — to a WebSocket on localhost. The variable is cleared *before*
- * the import because the gate is read as the module evaluates; clearing it
- * afterwards would be too late.
- *
- * Exported so the clearing can be tested on its own: the caller below ends in a
- * renderer that hangs without a TTY, which a test cannot drive.
- */
 export async function loadRenderer(): Promise<typeof import("@opentui/react")> {
   delete process.env.DEV;
   return await import("@opentui/react");
 }
 
-/**
- * Mints a secret, says it out loud once, and joins the channel it names.
- *
- * The invite goes to stdout so it stays pipeable and copy-pasteable; the
- * warning goes to stderr so it never travels with the thing it warns about.
- */
 async function runNew(command: NewCommand): Promise<void> {
   const { generatePsk } = await import("../shared/crypto/psk.ts");
   const { formatInvite } = await import("../shared/protocol/invite.ts");
@@ -308,15 +254,9 @@ async function runChat(psk: Uint8Array, relayUrl: string, given: string | undefi
 
   const { startSession } = await import("./session.ts");
 
-  // The screen never holds the secret. It is captured here instead, where the
-  // only thing that crosses into React is a function — and a function is not
-  // something devtools can serialise.
   const connect = (handlers: SessionHandlers) =>
     startSession({ psk, nick, relayUrl, handlers });
 
-  // Imported here rather than at the top of the file so `--help` never loads
-  // the renderer at all: constructing one without a TTY hangs. `App.tsx` comes
-  // after `loadRenderer`, because its JSX pulls in `@opentui/react` too.
   const { createCliRenderer } = await import("@opentui/core");
   const { createElement, createRoot } = await loadRenderer();
   const { App } = await import("./tui/App.tsx");
@@ -324,8 +264,6 @@ async function runChat(psk: Uint8Array, relayUrl: string, given: string | undefi
   const renderer = await createCliRenderer();
   const root = createRoot(renderer);
 
-  // `/exit` unwinds what this function built, in the order it was built, so
-  // the terminal is handed back the way it was found.
   const onExit = () => {
     root.unmount();
     renderer.destroy();
@@ -336,9 +274,6 @@ async function runChat(psk: Uint8Array, relayUrl: string, given: string | undefi
 }
 
 async function runServe(command: ServeCommand): Promise<void> {
-  // Imported here rather than at the top of the file so that running the
-  // client never loads relay code at all. The relay is a separate deployable;
-  // the only thing the two share is the wire format.
   const { startRelay } = await import("../server/relay.ts");
 
   const server = startRelay({
@@ -349,8 +284,6 @@ async function runServe(command: ServeCommand): Promise<void> {
 }
 
 export async function main(argv: string[]): Promise<number> {
-  // The whole body, not just `parseArgs`: a malformed invite raises UsageError
-  // from `runJoin` too, and that is the path most users reach it by.
   try {
     const command = parseArgs(argv);
 
