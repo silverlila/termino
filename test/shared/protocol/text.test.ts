@@ -108,6 +108,13 @@ describe("a room name", () => {
     expect(roomProblem("r".repeat(65))).toContain("over the limit of 64");
     expect(roomProblem("silver and ana")).toBeNull();
   });
+
+  it("refuses a zero-width character, which would route the two typings apart unseen", () => {
+    // "silver" and "sil<U+200B>ver" look the same and derive different handles, so each
+    // side would wait alone with nothing on screen to say why.
+    expect(roomProblem("sil​ver")).toContain("U+200B");
+    expect(roomProblem("silver﻿")).toContain("U+FEFF");
+  });
 });
 
 describe("a passphrase", () => {

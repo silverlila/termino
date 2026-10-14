@@ -15,6 +15,7 @@
  */
 
 import { ristretto255, ristretto255_hasher } from "@noble/curves/ed25519.js";
+import { bytesToNumberLE } from "@noble/curves/utils.js";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { concatBytes } from "@noble/hashes/utils.js";
 
@@ -79,11 +80,7 @@ export function sampleScalar(): bigint {
 }
 
 export function scalarFromBytes(littleEndian: Uint8Array): bigint {
-  let scalar = 0n;
-  for (let index = littleEndian.length - 1; index >= 0; index -= 1) {
-    scalar = (scalar << 8n) | BigInt(littleEndian[index]!);
-  }
-  return scalar;
+  return bytesToNumberLE(littleEndian);
 }
 
 export function scalarMult(scalar: bigint, generator: Point): Uint8Array {

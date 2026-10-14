@@ -791,20 +791,27 @@ describe("a peer's presence", () => {
 
 describe("a handshake timeout", () => {
   it("defaults to twenty seconds", () => {
-    // Long enough for somebody to be slow opening a second terminal, and short
-    // enough that a wrong invite does not read as a hang.
+    // Counted from the peer's hello: long enough for a slow network, short
+    // enough that a handshake somebody is sitting in the middle of is reported.
     expect(HANDSHAKE_TIMEOUT_MS).toBe(20_000);
   });
 
-  it("says nobody is here when no hello ever arrives", async () => {
-    const attempt = startSession({
+  it("does not run while nobody else is here, so a slow joiner still gets in", async () => {
+    // The invite travels by hand. Being alone until it arrives is the ordinary
+    // case, not a failure; the clock is for a handshake that started and stalled.
+    const alice = startSession({
       psk: PSK,
       nick: "alice",
       relayUrl: relay.url,
       handshakeTimeoutMs: IMPATIENT,
     });
 
-    await expect(attempt).rejects.toThrow(/nobody else is here yet/);
+    await wait(IMPATIENT * 4);
+    const bob = await joinAs("bob");
+    const session = await alice;
+    sessions.push(session);
+
+    expect(session.sasWords).toBe(bob.session.sasWords);
   });
 
   it("says somebody may be in the middle when a hello arrives and nothing opens", async () => {
@@ -818,32 +825,6 @@ describe("a handshake timeout", () => {
     });
 
     await expect(attempt).rejects.toThrow(/somebody is in the middle/);
-  });
-
-  it("tells the two failures apart", async () => {
-    await openSilentPeer(deriveHandle(OTHER_PSK));
-
-    const answered = await rejection(
-      startSession({
-        psk: OTHER_PSK,
-        nick: "alice",
-        relayUrl: relay.url,
-        handshakeTimeoutMs: PATIENT,
-      }),
-    );
-
-    const alone = await rejection(
-      startSession({
-        psk: PSK,
-        nick: "alice",
-        relayUrl: relay.url,
-        handshakeTimeoutMs: IMPATIENT,
-      }),
-    );
-
-    // Two different events, said two different ways: one is a conversation
-    // nobody has joined yet, the other is an alarm.
-    expect(answered.message).not.toBe(alone.message);
   });
 });
 

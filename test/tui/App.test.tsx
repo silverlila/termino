@@ -339,11 +339,11 @@ describe("the chat screen", () => {
   });
 
   it("raises an alarm when no session could be established", async () => {
-    // Nobody else ever arrives, which is the ordinary half of this failure —
-    // and it is still not a hiccup to shrug at and re-run, because the other
-    // half of it is somebody sitting in the middle. Both end the same way:
+    // Somebody answers the hello and never confirms: a different secret, or
+    // somebody sitting in the middle. Not a hiccup to shrug at and re-run —
     // nothing was sent, and nothing will be.
     const { screen } = await mountChat("alice", relay.url, { handshakeTimeoutMs: 50 });
+    hostiles.push(await openHostilePeer(relay.url, PSK));
 
     const frame = await seeOnScreen(screen, "could not establish a session");
 

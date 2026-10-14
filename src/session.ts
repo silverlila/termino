@@ -93,13 +93,14 @@ export class SessionClosedError extends Error {
   }
 }
 
+/** Counted from the peer's hello, not from connecting: the invite travels by hand, and
+ * being alone until it arrives is the ordinary case rather than a failure. */
 export const HANDSHAKE_TIMEOUT_MS = 20_000;
 
 export const PING_INTERVAL_MS = 15_000;
 
 export const PRESENCE_EXPIRY_MS = 45_000;
 
-const NOBODY_HERE = "could not establish a session — nobody else is here yet";
 const IN_THE_MIDDLE =
   "could not establish a session — a different invite or passphrase, or somebody is in the middle";
 
@@ -151,10 +152,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     abandon = reject;
   });
 
-  const timer = setTimeout(
-    () => abandon(new Error(peerPublicKey === null ? NOBODY_HERE : IN_THE_MIDDLE)),
-    handshakeTimeoutMs,
-  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
   socket.addEventListener("close", () => {
     handlers.onConnectionChange?.("closed");
@@ -201,6 +199,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     }
 
     peerPublicKey = theirPublicKey;
+    timer = setTimeout(() => abandon(new Error(IN_THE_MIDDLE)), handshakeTimeoutMs);
 
     socket.send(hello);
 

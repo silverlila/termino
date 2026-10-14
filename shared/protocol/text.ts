@@ -43,7 +43,16 @@ export function visible(text: string): string {
 
 export function roomProblem(room: string): string | null {
   if (room.trim() === "") return "a room name is required";
-  return sizeProblem("room", room, MAX_ROOM_BYTES) ?? controlProblem("room", room);
+  return sizeProblem("room", room, MAX_ROOM_BYTES) ?? controlProblem("room", room) ?? zeroWidthProblem(room);
+}
+
+// Normalisation keeps zero-width characters, so a room name carrying one derives another
+// handle than the same name typed plainly, and each side waits alone with no sign why.
+function zeroWidthProblem(room: string): string | null {
+  const found = ZERO_WIDTH_PATTERN.exec(room);
+  if (found === null) return null;
+
+  return `room contains ${codePointName(found[0])}, a zero-width character`;
 }
 
 export function passphraseProblem(passphrase: string): string | null {

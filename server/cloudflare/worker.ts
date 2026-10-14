@@ -111,14 +111,16 @@ export class Channel extends DurableObject<Env> {
     // A stale subscriber holds a place a new one might be asking for. The sender has
     // just been heard from, so it is not one of them.
     this.forgetIdle(now, ws);
-    const decided = route(state.member, frame, this.subscribers().length, now);
+    // Only a subscribed sender is forwarded for, so this list already holds it then.
+    const subscribers = this.subscribers();
+    const decided = route(state.member, frame, subscribers.length, now);
     attach(ws, { member: decided.member, lastHeard: now });
 
     const { action } = decided;
     if (action.kind === "reject") return reject(ws, action.code);
     if (action.kind !== "forward") return;
 
-    for (const other of this.subscribers()) {
+    for (const other of subscribers) {
       if (other !== ws) attempt(() => other.send(raw));
     }
   }
