@@ -67,6 +67,21 @@ describe("hello frames", () => {
       FrameError,
     );
   });
+  it("carries a passphrase room's associated data when it has some, and round-trips it", () => {
+    const associatedData = Uint8Array.from({ length: 16 }, (_, index) => 200 + index);
+    const frame = helloFrame(HANDLE, PUBLIC_KEY, associatedData);
+
+    expect(Object.keys(frame).sort()).toEqual(["d", "h", "k", "t", "v"]);
+    const decoded = decodeFrame(encodeFrame(frame));
+    if (decoded.t !== "hello" || decoded.d === undefined) throw new Error("expected its d field");
+    expect(fromBase64(decoded.d)).toEqual(associatedData);
+  });
+
+  it("rejects associated data that is not 16 bytes", () => {
+    const wrong = { v: 2, t: "hello", h: HANDLE, k: toBase64(PUBLIC_KEY), d: toBase64(new Uint8Array(8)) };
+    expect(() => decodeFrame(JSON.stringify(wrong))).toThrow(/associated data is not 16 bytes/);
+    expect(() => decodeFrame(JSON.stringify({ ...wrong, d: 7 }))).toThrow(FrameError);
+  });
 });
 
 describe("message frames", () => {

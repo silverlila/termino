@@ -1,6 +1,6 @@
 /**
- * The relay: routes frames between two clients by handle, rate-limits, and caps
- * connections. It holds no key and can decrypt nothing.
+ * The self-hosted relay on Bun: applies channel.ts's rules to its sockets and caps
+ * connections per address and overall. It holds no key and can decrypt nothing.
  *
  * Bun specifics this file is shaped around: an exception escaping a fetch or socket
  * handler is printed with a stack trace, and the frame, handle and sender address are
@@ -9,61 +9,23 @@
  * must return a Response. `websocket.idleTimeout` is in seconds, defaults to 120 and is
  * capped at 960.
  *
- * Browsers attach an Origin header to a WebSocket handshake; the CLI never does.
- *
  * `onError` takes no arguments by design: the relay may report that something failed,
  * never anything about who it happened to.
  */
 
-import {
-  decodeFrame,
-  encodeFrame,
-  errFrame,
-  FrameError,
-  isClientFrame,
-  type ClientFrame,
-  type ErrorCode,
-  type SubFrame,
-} from "../shared/protocol/frame.ts";
+import { encodeFrame, errFrame, type ErrorCode } from "../shared/protocol/frame.ts";
+import { admit as admitPath, IDLE_TIMEOUT_SECONDS, newMember, route, type Member } from "./channel.ts";
 
 const DEFAULT_PORT = 8787;
-
-export const RATE_LIMIT_MESSAGES = 5;
-export const RATE_LIMIT_WINDOW_MS = 10_000;
 
 const MAX_CONNECTIONS = 1000;
 const MAX_CONNECTIONS_PER_IP = 10;
 
-export const MAX_SUBSCRIBERS_PER_HANDLE = 2;
-
-export const IDLE_TIMEOUT_SECONDS = 120;
-
 const UNKNOWN_SOURCE = "unknown";
 
-const TOKENS_PER_MS = RATE_LIMIT_MESSAGES / RATE_LIMIT_WINDOW_MS;
-
-export interface TokenBucket {
-  tokens: number;
-  updatedAt: number;
-}
-
-export function fullBucket(now: number): TokenBucket {
-  return { tokens: RATE_LIMIT_MESSAGES, updatedAt: now };
-}
-
-export function takeToken(bucket: TokenBucket, now: number): { bucket: TokenBucket; allowed: boolean } {
-  const elapsed = Math.max(0, now - bucket.updatedAt);
-  const refilled = Math.min(RATE_LIMIT_MESSAGES, bucket.tokens + elapsed * TOKENS_PER_MS);
-
-  if (refilled < 1) return { bucket: { tokens: refilled, updatedAt: now }, allowed: false };
-
-  return { bucket: { tokens: refilled - 1, updatedAt: now }, allowed: true };
-}
-
 interface Connection {
-  handle: string | null;
+  member: Member;
   source: string;
-  bucket: TokenBucket;
 }
 
 export interface RelayOptions {
@@ -100,7 +62,7 @@ export function startRelay(options: RelayOptions = {}) {
 
       message(ws, raw) {
         try {
-          route(ws, raw);
+          deliver(ws, raw);
         } catch {
           attempt(() => reject(ws, "bad_frame"));
           attempt(onError);
@@ -120,9 +82,8 @@ export function startRelay(options: RelayOptions = {}) {
   }
 
   function admitRequest(request: Request): Response | undefined {
-    if (new URL(request.url).pathname !== "/") return refuse("only / is served");
-
-    if (request.headers.has("origin")) return refuse("no browser clients");
+    const admission = admitPath(new URL(request.url), request.headers);
+    if (!admission.ok) return refuse(admission.reason);
 
     const source = server.requestIP(request)?.address ?? UNKNOWN_SOURCE;
     if (openConnections >= maxConnections) return refuse("too many connections");
@@ -130,7 +91,7 @@ export function startRelay(options: RelayOptions = {}) {
       return refuse("too many connections from this address");
     }
 
-    const connection: Connection = { handle: null, source, bucket: fullBucket(now()) };
+    const connection: Connection = { member: newMember(admission.handle, now()), source };
 
     admit(source);
     let upgraded = false;
@@ -161,53 +122,15 @@ export function startRelay(options: RelayOptions = {}) {
     else openPerSource.delete(source);
   }
 
-  function route(ws: Bun.ServerWebSocket<Connection>, raw: string | Buffer): void {
-    const frame = parse(raw);
+  function deliver(ws: Bun.ServerWebSocket<Connection>, raw: string | Buffer): void {
+    const { member } = ws.data;
+    const decided = route(member, raw, server.subscriberCount(member.handle), now());
+    ws.data.member = decided.member;
 
-    if (frame === null) return reject(ws, "bad_frame");
-
-    const limit = takeToken(ws.data.bucket, now());
-    ws.data.bucket = limit.bucket;
-    if (!limit.allowed) return reject(ws, "rate_limited");
-
-    if (frame.t === "sub") return subscribe(ws, frame);
-    return forward(ws, frame, raw);
-  }
-
-  function parse(raw: string | Buffer): ClientFrame | null {
-    try {
-      const frame = decodeFrame(raw);
-      return isClientFrame(frame) ? frame : null;
-    } catch (error) {
-      if (error instanceof FrameError) return null;
-      throw error;
-    }
-  }
-
-  function subscribe(ws: Bun.ServerWebSocket<Connection>, frame: SubFrame): void {
-    const previous = ws.data.handle;
-    if (previous === frame.h) return;
-
-    if (server.subscriberCount(frame.h) >= MAX_SUBSCRIBERS_PER_HANDLE) {
-      return reject(ws, "channel_full");
-    }
-
-    if (previous !== null) ws.unsubscribe(previous);
-
-    ws.data.handle = frame.h;
-    ws.subscribe(frame.h);
-  }
-
-  function forward(
-    ws: Bun.ServerWebSocket<Connection>,
-    frame: ClientFrame,
-    raw: string | Buffer,
-  ): void {
-    const handle = ws.data.handle;
-    if (handle === null) return reject(ws, "not_subscribed");
-    if (frame.h !== handle) return reject(ws, "bad_frame");
-
-    ws.publish(handle, raw);
+    const { action } = decided;
+    if (action.kind === "reject") return reject(ws, action.code);
+    if (action.kind === "subscribe") ws.subscribe(member.handle);
+    if (action.kind === "forward") ws.publish(member.handle, raw);
   }
 
   function reject(ws: Bun.ServerWebSocket<Connection>, code: ErrorCode): void {

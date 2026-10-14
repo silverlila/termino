@@ -19,7 +19,8 @@ import {
   msgFrame,
   subFrame,
 } from "../../shared/protocol/frame.ts";
-import { startRelay, RATE_LIMIT_WINDOW_MS, type RelayOptions } from "../../server/relay.ts";
+import { RATE_LIMIT_WINDOW_MS } from "../../server/channel.ts";
+import { startRelay, type RelayOptions } from "../../server/relay.ts";
 
 export const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,7 +62,7 @@ export interface HostilePeer {
 export async function openHostilePeer(relayUrl: string, psk: Uint8Array): Promise<HostilePeer> {
   const handle = deriveHandle(psk);
   const ephemeral = startHandshake();
-  const socket = new WebSocket(relayUrl);
+  const socket = new WebSocket(new URL(handle, relayUrl));
 
   await new Promise<void>((resolve) => socket.addEventListener("open", () => resolve()));
 

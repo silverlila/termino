@@ -1,6 +1,7 @@
 /**
  * The ephemeral X25519 exchange, folded with the pre-shared key to produce the session
- * root, the two chain keys and the SAS.
+ * root, the two chain keys and the SAS. Passphrase mode (passphrase.ts) replaces the
+ * exchange with CPace and shares everything from the root down — `deriveSessionKeys`.
  *
  * @noble/curves rejects a low-order peer key: `x25519.getSharedSecret` throws rather than
  * returning the all-zero shared secret such a key produces. That failure leaves this file
@@ -46,6 +47,24 @@ export class HandshakeError extends Error {
   }
 }
 
+/** One side of a key exchange, whichever kind: what goes in its hello, and how the
+ * other side's hello turns into session keys. */
+export interface Exchange {
+  publicKey: Uint8Array;
+  associatedData: Uint8Array | null;
+  complete(theirPublicKey: Uint8Array, theirAssociatedData: Uint8Array | null): SessionKeys;
+}
+
+export function inviteExchange(psk: Uint8Array): Exchange {
+  const ephemeral = startHandshake();
+
+  return {
+    publicKey: ephemeral.publicKey,
+    associatedData: null,
+    complete: (theirPublicKey) => completeHandshake(psk, ephemeral, theirPublicKey),
+  };
+}
+
 export function startHandshake(): EphemeralKeys {
   return x25519.keygen();
 }
@@ -64,22 +83,38 @@ export function completeHandshake(
     );
   }
 
-  const order = compareBytes(myEphemeral.publicKey, theirPublicKey);
-
-  if (order === 0) {
-    throw new HandshakeError("the peer's public key is our own — the hello was reflected back");
-  }
+  refuseReflection(myEphemeral.publicKey, theirPublicKey);
 
   const shared = x25519.getSharedSecret(myEphemeral.secretKey, theirPublicKey);
+  const keys = deriveSessionKeys(shared, psk, SESSION_LABEL, myEphemeral.publicKey, theirPublicKey);
+  shared.fill(0);
 
-  const weSortLower = order < 0;
-  const [lower, higher] = weSortLower
-    ? [myEphemeral.publicKey, theirPublicKey]
-    : [theirPublicKey, myEphemeral.publicKey];
+  return keys;
+}
+
+export function refuseReflection(myPublicKey: Uint8Array, theirPublicKey: Uint8Array): void {
+  if (compareBytes(myPublicKey, theirPublicKey) === 0) {
+    throw new HandshakeError("the peer's public key is our own — the hello was reflected back");
+  }
+}
+
+/**
+ * From an exchange's output to the session: the root binds both public keys, sorted, into
+ * its info, and direction is decided by the same sort — never by who connected first,
+ * which the relay controls.
+ */
+export function deriveSessionKeys(
+  secret: Uint8Array,
+  salt: Uint8Array | undefined,
+  label: string,
+  myPublicKey: Uint8Array,
+  theirPublicKey: Uint8Array,
+): SessionKeys {
+  const weSortLower = compareBytes(myPublicKey, theirPublicKey) < 0;
+  const [lower, higher] = weSortLower ? [myPublicKey, theirPublicKey] : [theirPublicKey, myPublicKey];
   const transcript = bytesToHex(concatBytes(lower, higher));
 
-  const root = hkdf(sha256, shared, psk, utf8(SESSION_LABEL + transcript), ROOT_BYTES);
-  shared.fill(0);
+  const root = hkdf(sha256, secret, salt, utf8(label + transcript), ROOT_BYTES);
 
   const lowerToHigher = hkdf(sha256, root, undefined, utf8(LO_HI_CHAIN_LABEL), CHAIN_BYTES);
   const higherToLower = hkdf(sha256, root, undefined, utf8(HI_LO_CHAIN_LABEL), CHAIN_BYTES);

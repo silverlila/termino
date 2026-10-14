@@ -19,5 +19,7 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src", "shared", "server", "test"]
+  "include": ["src", "shared", "server", "test"],
+  // The Worker compiles against Cloudflare's runtime types, which clash with Bun's.
+  "exclude": ["server/cloudflare"]
 }

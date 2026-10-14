@@ -1,0 +1,37 @@
+{
+  // The project's default relay, and the one-command deploy for anyone who wants
+  // their own: `bunx wrangler deploy --config server/cloudflare/wrangler.jsonc`.
+  "name": "termino-relay",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  // frame.ts reads base64 and UTF-8 through Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+  // The relay writes nothing about anyone; Cloudflare's log store included.
+  "observability": { "enabled": false },
+  "durable_objects": {
+    "bindings": [{ "name": "CHANNEL", "class_name": "Channel" }]
+  },
+  // A person opens one connection per chat; thirty in ten seconds from one address is
+  // somebody doing something else.
+  "ratelimits": [
+    { "name": "CONNECTIONS_PER_ADDRESS", "namespace_id": "1001", "simple": { "limit": 30, "period": 10 } }
+  ],
+  // The free plan offers only SQLite-backed Durable Objects. Nothing is stored in it.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Channel"] }],
+
+  "env": {
+    // `wrangler dev --env test`, for test/server/cloudflare/worker.test.ts only: one
+    // address opens every connection there, so the limit is raised, and idle reaping is
+    // shortened so it can be watched. Bindings are not inherited, so both are repeated.
+    "test": {
+      "observability": { "enabled": false },
+      "durable_objects": {
+        "bindings": [{ "name": "CHANNEL", "class_name": "Channel" }]
+      },
+      "ratelimits": [
+        { "name": "CONNECTIONS_PER_ADDRESS", "namespace_id": "1001", "simple": { "limit": 400, "period": 10 } }
+      ],
+      "vars": { "IDLE_TIMEOUT_SECONDS": "3" }
+    }
+  }
+}

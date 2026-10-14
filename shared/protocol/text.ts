@@ -11,8 +11,15 @@
 
 export const MAX_BODY_BYTES = 1900;
 export const MAX_NICK_BYTES = 32;
+export const MAX_ROOM_BYTES = 64;
+export const MAX_PASSPHRASE_BYTES = 256;
+
+// Passphrase mode stops offline guessing, not online guessing: whoever runs the relay gets
+// one try per session. Too short a phrase is found in a handful of tries.
+export const MIN_PASSPHRASE_CHARACTERS = 10;
 
 const CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
+const EVERY_CONTROL_PATTERN = new RegExp(CONTROL_PATTERN.source, "gu");
 
 const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/u;
 
@@ -26,6 +33,36 @@ export function nickProblem(nick: string): string | null {
     controlProblem("nick", nick) ??
     blankProblem(nick)
   );
+}
+
+/** Text nobody vetted — an error that quotes what was pasted — made safe to draw, with
+ * each control character named in its place rather than executed. */
+export function visible(text: string): string {
+  return text.replace(EVERY_CONTROL_PATTERN, (character) => `<${codePointName(character)}>`);
+}
+
+export function roomProblem(room: string): string | null {
+  if (room.trim() === "") return "a room name is required";
+  return sizeProblem("room", room, MAX_ROOM_BYTES) ?? controlProblem("room", room);
+}
+
+export function passphraseProblem(passphrase: string): string | null {
+  // Counted as the exchange will see it: five decomposed "é" are ten code points typed
+  // but five characters keyed.
+  const length = graphemes(passphrase.normalize("NFKC").trim()).length;
+  if (length < MIN_PASSPHRASE_CHARACTERS) {
+    return `a passphrase needs at least ${MIN_PASSPHRASE_CHARACTERS} characters — a few words you both remember`;
+  }
+  return sizeProblem("passphrase", passphrase, MAX_PASSPHRASE_BYTES) ?? controlProblem("passphrase", passphrase);
+}
+
+/** What a person counts as one character: "👍🏽" and a decomposed "é" are one each. */
+export function graphemes(text: string): string[] {
+  return [...new Intl.Segmenter().segment(text)].map((part) => part.segment);
+}
+
+export function withoutControls(text: string): string {
+  return text.replace(EVERY_CONTROL_PATTERN, "");
 }
 
 function sizeProblem(field: string, value: string, maxBytes: number): string | null {

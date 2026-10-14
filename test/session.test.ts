@@ -148,8 +148,8 @@ async function pair(url = relay.url, timings: Timings = {}): Promise<{ alice: Pe
  * failing assertion returns through neither, and one socket left open outlives
  * the whole file.
  */
-async function openRawSocket(): Promise<WebSocket> {
-  const socket = new WebSocket(relay.url);
+async function openRawSocket(handle: string): Promise<WebSocket> {
+  const socket = new WebSocket(new URL(handle, relay.url));
   await new Promise<void>((resolve) => socket.addEventListener("open", () => resolve()));
   rawSockets.push(socket);
   return socket;
@@ -164,7 +164,7 @@ async function openRawSocket(): Promise<WebSocket> {
  * same re-send rule an honest client follows.
  */
 async function openSilentPeer(handle: string): Promise<void> {
-  const socket = await openRawSocket();
+  const socket = await openRawSocket(handle);
   let answered = false;
 
   socket.addEventListener("message", (event) => {
@@ -187,6 +187,7 @@ interface Meddler {
 }
 
 interface Pipe {
+  path: string;
   upstream: WebSocket | null;
   pending: string[];
 }
@@ -209,13 +210,14 @@ function startMeddler(
   const proxy = Bun.serve<Pipe, {}>({
     port: 0,
     fetch(request, server) {
-      if (server.upgrade(request, { data: { upstream: null, pending: [] } })) return undefined;
+      const path = new URL(request.url).pathname;
+      if (server.upgrade(request, { data: { path, upstream: null, pending: [] } })) return undefined;
       return new Response("websocket only", { status: 426 });
     },
     websocket: {
       open(ws) {
         downstream.add(ws);
-        const upstream = new WebSocket(`ws://localhost:${targetPort}/`);
+        const upstream = new WebSocket(`ws://localhost:${targetPort}${ws.data.path}`);
 
         upstream.addEventListener("open", () => {
           for (const text of ws.data.pending) upstream.send(text);
@@ -918,5 +920,55 @@ describe("a session being torn down", () => {
     await expect(pending).rejects.toBeInstanceOf(SessionClosedError);
     await settle();
     expect(bob.got.messages).toHaveLength(0);
+  });
+});
+
+describe("a passphrase room", () => {
+  const ROOM = "silver-and-ana";
+  const PHRASE = "the blue house on the corner";
+
+  it("establishes a session between two people who share the room and the phrase", async () => {
+    const received: IncomingMessage[] = [];
+    const [alice, bob] = await Promise.all([
+      startSession({ passphrase: { room: ROOM, phrase: PHRASE }, nick: "alice", relayUrl: relay.url }),
+      startSession({
+        passphrase: { room: ROOM, phrase: PHRASE },
+        nick: "bob",
+        relayUrl: relay.url,
+        handlers: { onMessage: (message) => received.push(message) },
+      }),
+    ]);
+    sessions.push(alice, bob);
+
+    expect(alice.sasWords).toBe(bob.sasWords);
+    await alice.send("met by phrase");
+    await until(() => received.length === 1);
+    expect(received[0]).toMatchObject({ nick: "alice", body: "met by phrase" });
+  });
+
+  it("fails on both sides, out loud, when the phrases differ", async () => {
+    // The one guess a wrong phrase gets is this live attempt, and it is seen.
+    const refusals = await Promise.all([
+      rejection(
+        startSession({
+          passphrase: { room: ROOM, phrase: PHRASE },
+          nick: "alice",
+          relayUrl: relay.url,
+          handshakeTimeoutMs: PATIENT,
+        }),
+      ),
+      rejection(
+        startSession({
+          passphrase: { room: ROOM, phrase: "a guess" },
+          nick: "mallory",
+          relayUrl: relay.url,
+          handshakeTimeoutMs: PATIENT,
+        }),
+      ),
+    ]);
+
+    for (const refusal of refusals) {
+      expect(refusal.message).toMatch(/a different invite or passphrase, or somebody is in the middle/);
+    }
   });
 });

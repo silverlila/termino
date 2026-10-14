@@ -14,6 +14,7 @@
  */
 
 import { testRender } from "@opentui/react/test-utils";
+import type { ReactNode } from "react";
 import { generatePsk } from "../../shared/crypto/psk.ts";
 import {
   startSession,
@@ -57,17 +58,22 @@ export async function mountChat(
   const connect = (handlers: SessionHandlers) =>
     startSession({ psk: PSK, nick, relayUrl, handlers, ...timings });
 
-  const screen = await testRender(
-    <App nick={nick} connect={connect} onExit={() => exits.push(Date.now())} />,
-    { width: WIDTH, height: HEIGHT },
+  const screen = await mount(
+    <App nick={nick} invite={null} connect={connect} onExit={() => exits.push(Date.now())} />,
   );
+
+  return { screen, exits };
+}
+
+export async function mount(node: ReactNode): Promise<Screen> {
+  const screen = await testRender(node, { width: WIDTH, height: HEIGHT });
 
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
   screens.push(screen);
 
   await screen.renderOnce();
 
-  return { screen, exits };
+  return screen;
 }
 
 export async function joinAs(nick: string, relayUrl: string): Promise<Peer> {

@@ -33,6 +33,12 @@ describe("/exit", () => {
   });
 });
 
+describe("/copy", () => {
+  it("asks to copy the invite", () => {
+    expect(parseComposerInput("/copy")).toEqual({ kind: "copy" });
+  });
+});
+
 describe("/help", () => {
   it("asks for the command list", () => {
     expect(parseComposerInput("/help")).toEqual({ kind: "help" });
@@ -63,7 +69,7 @@ describe("/verify", () => {
   });
 
   it("is not in the command list", () => {
-    expect(COMMANDS.map((command) => command.usage)).toEqual(["/help", "/exit"]);
+    expect(COMMANDS.map((command) => command.usage)).not.toContain("/verify");
   });
 });
 

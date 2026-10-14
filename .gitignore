@@ -5,3 +5,4 @@ docs/
 CLAUDE.md
 .claude/field-guide.md
 # bun.lock is committed deliberately — it pins the pre-1.0 OpenTUI builds.
+.wrangler/

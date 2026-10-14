@@ -441,7 +441,7 @@ describe("/exit", () => {
     // The relay has room for exactly two, so a place being free is the proof
     // that alice's socket really closed rather than her screen merely being
     // asked to go away.
-    const socket = new WebSocket(relay.url);
+    const socket = new WebSocket(new URL(deriveHandle(PSK), relay.url));
     const refusals: string[] = [];
     socket.addEventListener("message", (event) => refusals.push(String(event.data)));
 

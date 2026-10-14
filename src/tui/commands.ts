@@ -1,11 +1,13 @@
 export const COMMANDS = [
   { usage: "/help", summary: "list these commands" },
+  { usage: "/copy", summary: "copy the invite to the clipboard" },
   { usage: "/exit", summary: "leave the channel and close termino" },
 ] as const;
 
 export type ComposerInput =
   | { kind: "message"; body: string }
   | { kind: "help" }
+  | { kind: "copy" }
   | { kind: "exit" }
   | { kind: "unusable"; reason: string };
 
@@ -16,6 +18,7 @@ export function parseComposerInput(line: string): ComposerInput {
   const [name = ""] = trimmed.split(/\s+/);
 
   if (name === "/help") return { kind: "help" };
+  if (name === "/copy") return { kind: "copy" };
   if (name === "/exit") return { kind: "exit" };
 
   return { kind: "unusable", reason: `unknown command ${name} — /help lists them` };
