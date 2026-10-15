@@ -1,7 +1,15 @@
+/**
+ * OpenTUI's `copyToClipboardOSC52` reports success unless the terminal said otherwise, so
+ * a terminal that silently drops OSC 52 looks the same as one that copied — which is why
+ * the copy notice says what to do if pasting gives nothing.
+ */
+
+import { useRenderer } from "@opentui/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConnectionState, Session, SessionHandlers } from "../session.ts";
 import { COMMANDS, parseComposerInput } from "./commands.ts";
 import { Composer } from "./Composer.tsx";
+import { InvitePanel } from "./InvitePanel.tsx";
 import {
   MessageList,
   type Entry,
@@ -13,12 +21,13 @@ import { StatusBar } from "./StatusBar.tsx";
 
 export interface AppProps {
   nick: string;
+  invite: string | null;
   connect: (handlers: SessionHandlers) => Promise<Session>;
   onExit: () => void;
 }
 
-export function App({ nick, connect, onExit }: AppProps) {
-  const chat = useChat({ connect, onExit });
+export function App({ nick, invite, connect, onExit }: AppProps) {
+  const chat = useChat({ invite, connect, onExit });
 
   return (
     <box
@@ -35,6 +44,7 @@ export function App({ nick, connect, onExit }: AppProps) {
         connection={chat.connection}
         peerPresent={chat.peerPresent}
       />
+      {invite !== null && chat.sasWords === "" ? <InvitePanel invite={invite} /> : null}
       <MessageList entries={chat.entries} />
       <Composer onSubmit={chat.submit} />
     </box>
@@ -67,6 +77,14 @@ export function gapNotice(nick: string, count: number): string {
 
 const THIRD_PARTY_NOTICE = "⚠ a third party tried to join this channel";
 
+const NO_INVITE_NOTICE = "there is no invite to copy — you joined with someone else's";
+
+const COPIED_NOTICE =
+  "invite sent to the clipboard — if pasting gives nothing, select it with the mouse; " +
+  "clear your clipboard once it is pasted, since clipboard history keeps it";
+
+const COPY_REFUSED_NOTICE = "this terminal does not allow copying — select the invite with the mouse";
+
 function failedNotice(reason: string): string {
   return `⚠ ${reason}`;
 }
@@ -81,7 +99,8 @@ interface Chat {
   submit: (line: string) => void;
 }
 
-function useChat(options: Pick<AppProps, "connect" | "onExit">): Chat {
+function useChat(options: Pick<AppProps, "invite" | "connect" | "onExit">): Chat {
+  const renderer = useRenderer();
   const [lines, setLines] = useState<TranscriptLine[]>([]);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [sasWords, setSasWords] = useState("");
@@ -184,6 +203,13 @@ function useChat(options: Pick<AppProps, "connect" | "onExit">): Chat {
     [append, notice],
   );
 
+  const copyInvite = useCallback(() => {
+    if (options.invite === null) return notice(NO_INVITE_NOTICE);
+
+    const copied = renderer.copyToClipboardOSC52(options.invite);
+    notice(copied ? COPIED_NOTICE : COPY_REFUSED_NOTICE);
+  }, [notice, options.invite, renderer]);
+
   const leave = useCallback(() => {
     session.current?.close();
     session.current = null;
@@ -196,6 +222,7 @@ function useChat(options: Pick<AppProps, "connect" | "onExit">): Chat {
 
       if (input.kind === "unusable") return notice(input.reason);
       if (input.kind === "exit") return leave();
+      if (input.kind === "copy") return copyInvite();
 
       if (input.kind === "help") {
         for (const command of COMMANDS) notice(`${command.usage} — ${command.summary}`);
@@ -204,7 +231,7 @@ function useChat(options: Pick<AppProps, "connect" | "onExit">): Chat {
 
       send(input.body);
     },
-    [leave, notice, send],
+    [copyInvite, leave, notice, send],
   );
 
   return { entries: lines, connection, sasWords, peerPresent, submit };

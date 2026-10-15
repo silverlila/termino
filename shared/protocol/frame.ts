@@ -13,6 +13,8 @@ export const MAX_FRAME_BYTES = 8192;
 
 const PUBLIC_KEY_BYTES = 32;
 
+const ASSOCIATED_DATA_BYTES = 16;
+
 const MAX_COUNTER = 0xffffffff;
 
 const HANDLE_PATTERN = /^[0-9a-f]{32}$/;
@@ -37,6 +39,7 @@ export interface HelloFrame {
   t: "hello";
   h: string;
   k: string;
+  d?: string;
 }
 
 export interface MsgFrame {
@@ -75,8 +78,14 @@ export function subFrame(handle: string): SubFrame {
   return { v: PROTOCOL_VERSION, t: "sub", h: handle };
 }
 
-export function helloFrame(handle: string, publicKey: Uint8Array): HelloFrame {
-  return { v: PROTOCOL_VERSION, t: "hello", h: handle, k: toBase64(publicKey) };
+export function helloFrame(
+  handle: string,
+  publicKey: Uint8Array,
+  associatedData: Uint8Array | null = null,
+): HelloFrame {
+  const frame: HelloFrame = { v: PROTOCOL_VERSION, t: "hello", h: handle, k: toBase64(publicKey) };
+  if (associatedData !== null) frame.d = toBase64(associatedData);
+  return frame;
 }
 
 export function msgFrame(handle: string, counter: number, ciphertext: Uint8Array): MsgFrame {
@@ -89,6 +98,10 @@ export function errFrame(code: ErrorCode): ErrFrame {
 
 export function encodeFrame(frame: Frame): string {
   return JSON.stringify(frame);
+}
+
+export function isHandle(text: string): boolean {
+  return HANDLE_PATTERN.test(text);
 }
 
 export function isClientFrame(frame: Frame): frame is ClientFrame {
@@ -127,6 +140,7 @@ export function decodeFrame(raw: string | Uint8Array): Frame {
         t: "hello",
         h: readHandle(fields.h),
         k: readPublicKey(fields.k),
+        ...(fields.d === undefined ? {} : { d: readAssociatedData(fields.d) }),
       };
     case "msg":
       return {
@@ -155,6 +169,14 @@ function readPublicKey(value: unknown): string {
   if (typeof value !== "string") throw new FrameError("public key is not a string");
   if (fromBase64(value).length !== PUBLIC_KEY_BYTES) {
     throw new FrameError(`public key is not ${PUBLIC_KEY_BYTES} bytes`);
+  }
+  return value;
+}
+
+function readAssociatedData(value: unknown): string {
+  if (typeof value !== "string") throw new FrameError("associated data is not a string");
+  if (fromBase64(value).length !== ASSOCIATED_DATA_BYTES) {
+    throw new FrameError(`associated data is not ${ASSOCIATED_DATA_BYTES} bytes`);
   }
   return value;
 }

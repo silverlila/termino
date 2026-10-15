@@ -4,6 +4,9 @@ import {
   MAX_BODY_BYTES,
   MAX_NICK_BYTES,
   nickProblem,
+  passphraseProblem,
+  roomProblem,
+  visible,
 } from "../../../shared/protocol/text.ts";
 
 /**
@@ -95,6 +98,57 @@ describe("a nickname", () => {
     expect(MAX_NICK_BYTES).toBe(32);
     expect(nickProblem("a".repeat(32))).toBeNull();
     expect(nickProblem("a".repeat(33))).toContain("33");
+  });
+});
+
+describe("a room name", () => {
+  it("is required, and held to the same control-character rule as a nick", () => {
+    expect(roomProblem("   ")).toBe("a room name is required");
+    expect(roomProblem("room\u001B[2J")).toContain("U+001B");
+    expect(roomProblem("r".repeat(65))).toContain("over the limit of 64");
+    expect(roomProblem("silver and ana")).toBeNull();
+  });
+
+  it("refuses a zero-width character, which would route the two typings apart unseen", () => {
+    expect(roomProblem("sil​ver")).toContain("U+200B");
+    expect(roomProblem("silver﻿")).toContain("U+FEFF");
+  });
+});
+
+describe("a passphrase", () => {
+  it("needs ten characters, counted as a person counts them", () => {
+    expect(passphraseProblem("hunter2")).toContain("at least 10 characters");
+    expect(passphraseProblem("  short  ")).toContain("at least 10 characters");
+    expect(passphraseProblem("🐙".repeat(9))).toContain("at least 10 characters");
+    expect(passphraseProblem("🐙".repeat(10))).toBeNull();
+    expect(passphraseProblem("the blue house")).toBeNull();
+  });
+
+  it("counts the phrase the exchange will use, after normalising it", () => {
+    expect(passphraseProblem("e\u0301".repeat(5))).toContain("at least 10 characters");
+  });
+
+  it("refuses control characters and anything over 256 bytes", () => {
+    expect(passphraseProblem("the blue\nhouse")).toContain("U+000A");
+    expect(passphraseProblem("w".repeat(257))).toContain("over the limit of 256");
+  });
+});
+
+describe("text made visible", () => {
+  it("names every control character in its place instead of keeping it", () => {
+    expect(visible("a\u001B]52;c;ZXZpbA==\u0007b\u001B[2J")).toBe(
+      "a<U+001B>]52;c;ZXZpbA==<U+0007>b<U+001B>[2J",
+    );
+  });
+
+  it("names bidi overrides and line separators too", () => {
+    expect(visible("x\u202Ey\u2028z")).toBe("x<U+202E>y<U+2028>z");
+  });
+
+  it("leaves ordinary text alone", () => {
+    expect(visible("not a word from the list: zzzz — ünïcode")).toBe(
+      "not a word from the list: zzzz — ünïcode",
+    );
   });
 });
 

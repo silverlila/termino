@@ -15,7 +15,7 @@ function stateLabel(connection: ConnectionState, peerPresent: boolean): string {
   return peerPresent ? "connected · both here" : "connected · the other side has gone quiet";
 }
 
-const UNAUDITED_BANNER = "⚠ unaudited — no external security review; see THREAT-MODEL.md";
+export const UNAUDITED_BANNER = "⚠ unaudited — no external security review; see THREAT-MODEL.md";
 
 const SAS_LABEL = "session words:";
 

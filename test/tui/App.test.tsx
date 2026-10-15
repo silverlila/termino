@@ -339,11 +339,8 @@ describe("the chat screen", () => {
   });
 
   it("raises an alarm when no session could be established", async () => {
-    // Nobody else ever arrives, which is the ordinary half of this failure —
-    // and it is still not a hiccup to shrug at and re-run, because the other
-    // half of it is somebody sitting in the middle. Both end the same way:
-    // nothing was sent, and nothing will be.
     const { screen } = await mountChat("alice", relay.url, { handshakeTimeoutMs: 50 });
+    hostiles.push(await openHostilePeer(relay.url, PSK));
 
     const frame = await seeOnScreen(screen, "could not establish a session");
 
@@ -441,7 +438,7 @@ describe("/exit", () => {
     // The relay has room for exactly two, so a place being free is the proof
     // that alice's socket really closed rather than her screen merely being
     // asked to go away.
-    const socket = new WebSocket(relay.url);
+    const socket = new WebSocket(new URL(deriveHandle(PSK), relay.url));
     const refusals: string[] = [];
     socket.addEventListener("message", (event) => refusals.push(String(event.data)));
 

@@ -19,5 +19,6 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["src", "shared", "server", "test"]
+  "include": ["src", "shared", "server", "test"],
+  "exclude": ["server/cloudflare"]
 }

@@ -13,7 +13,8 @@
  * failures.
  */
 
-import { completeHandshake, startHandshake } from "../shared/crypto/handshake.ts";
+import { inviteExchange, type Exchange } from "../shared/crypto/handshake.ts";
+import { deriveRoomHandle, passphraseExchange } from "../shared/crypto/passphrase.ts";
 import { deriveHandle } from "../shared/crypto/psk.ts";
 import { nextKey, startReceiving, type MessageKey, type ReceivingChain } from "../shared/crypto/ratchet.ts";
 import {
@@ -60,15 +61,23 @@ export interface SessionHandlers {
   onConnectionChange?(state: ConnectionState): void;
 }
 
-export interface SessionOptions {
-  psk: Uint8Array;
+export interface Passphrase {
+  room: string;
+  phrase: string;
+}
+
+export type SessionSecret =
+  | { psk: Uint8Array; passphrase?: never }
+  | { passphrase: Passphrase; psk?: never };
+
+export type SessionOptions = SessionSecret & {
   nick: string;
   relayUrl: string;
   handlers?: SessionHandlers;
   handshakeTimeoutMs?: number;
   pingIntervalMs?: number;
   presenceExpiryMs?: number;
-}
+};
 
 export interface Session {
   handle: string;
@@ -89,20 +98,20 @@ export const PING_INTERVAL_MS = 15_000;
 
 export const PRESENCE_EXPIRY_MS = 45_000;
 
-const NOBODY_HERE = "could not establish a session — nobody else is here yet";
 const IN_THE_MIDDLE =
-  "could not establish a session — wrong invite, or somebody is in the middle";
+  "could not establish a session — a different invite or passphrase, or somebody is in the middle";
 
 export async function startSession(options: SessionOptions): Promise<Session> {
   const handlers = options.handlers ?? {};
-  const { nick, psk } = options;
+  const { nick } = options;
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   const pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS;
   const presenceExpiryMs = options.presenceExpiryMs ?? PRESENCE_EXPIRY_MS;
-  const handle = deriveHandle(psk);
+  const handle =
+    options.psk !== undefined ? deriveHandle(options.psk) : deriveRoomHandle(options.passphrase.room);
 
   handlers.onConnectionChange?.("connecting");
-  const socket = new WebSocket(options.relayUrl);
+  const socket = new WebSocket(new URL(handle, options.relayUrl));
 
   await new Promise<void>((resolve, reject) => {
     socket.addEventListener("open", () => resolve(), { once: true });
@@ -111,7 +120,11 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     });
   });
 
-  const ephemeral = startHandshake();
+  const exchange: Exchange =
+    options.psk !== undefined
+      ? inviteExchange(options.psk)
+      : passphraseExchange(options.passphrase.room, options.passphrase.phrase);
+  const hello = encodeFrame(helloFrame(handle, exchange.publicKey, exchange.associatedData));
 
   let peerPublicKey: Uint8Array | null = null;
   let sendChain: Uint8Array | null = null;
@@ -136,10 +149,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     abandon = reject;
   });
 
-  const timer = setTimeout(
-    () => abandon(new Error(peerPublicKey === null ? NOBODY_HERE : IN_THE_MIDDLE)),
-    handshakeTimeoutMs,
-  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
   socket.addEventListener("close", () => {
     handlers.onConnectionChange?.("closed");
@@ -153,7 +163,7 @@ export async function startSession(options: SessionOptions): Promise<Session> {
   });
 
   socket.send(encodeFrame(subFrame(handle)));
-  socket.send(encodeFrame(helloFrame(handle, ephemeral.publicKey)));
+  socket.send(hello);
 
   async function receive(raw: string): Promise<void> {
     let frame: Frame;
@@ -186,11 +196,13 @@ export async function startSession(options: SessionOptions): Promise<Session> {
     }
 
     peerPublicKey = theirPublicKey;
+    timer = setTimeout(() => abandon(new Error(IN_THE_MIDDLE)), handshakeTimeoutMs);
 
-    socket.send(encodeFrame(helloFrame(handle, ephemeral.publicKey)));
+    socket.send(hello);
 
     try {
-      const keys = completeHandshake(psk, ephemeral, theirPublicKey);
+      const theirAssociatedData = frame.d === undefined ? null : fromBase64(frame.d);
+      const keys = exchange.complete(theirPublicKey, theirAssociatedData);
 
       sendChain = keys.sendChain;
       receiving = startReceiving(keys.recvChain);

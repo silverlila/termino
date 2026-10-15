@@ -1,0 +1,27 @@
+{
+  "name": "termino-relay",
+  "main": "worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": false },
+  "durable_objects": {
+    "bindings": [{ "name": "CHANNEL", "class_name": "Channel" }]
+  },
+  "ratelimits": [
+    { "name": "CONNECTIONS_PER_ADDRESS", "namespace_id": "1001", "simple": { "limit": 30, "period": 10 } }
+  ],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Channel"] }],
+
+  "env": {
+    "test": {
+      "observability": { "enabled": false },
+      "durable_objects": {
+        "bindings": [{ "name": "CHANNEL", "class_name": "Channel" }]
+      },
+      "ratelimits": [
+        { "name": "CONNECTIONS_PER_ADDRESS", "namespace_id": "1001", "simple": { "limit": 400, "period": 10 } }
+      ],
+      "vars": { "IDLE_TIMEOUT_SECONDS": "3" }
+    }
+  }
+}

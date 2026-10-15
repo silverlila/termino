@@ -156,11 +156,26 @@ Three things make this sharper than it sounds:
   this version, so the relay — and anyone who takes the machine, subpoenas its host, or watches
   its uplink — sees the real addresses of both ends. This is the largest unmitigated gap in the
   system and it is a known one, not an oversight.
-- **A self-hosted relay has an anonymity set of two.** This project operates no public relay, so
-  in practice a relay is run by one of the two people talking, and it carries one conversation.
-  On a busy shared server your connection is hidden in a crowd; here there is no crowd, and every
-  connection to that host is a participant. Finding the host is most of the way to naming both
-  parties — and one of those parties is whoever is paying for it.
+- **The default relay runs on Cloudflare, and the project runs it.** A new chat meets on the
+  project's relay unless `--relay` or `TERMINO_RELAY` names another. Two parties see its traffic:
+  the project, which deployed it, and Cloudflare, which terminates the TLS connection in front of
+  it and so sees each address, each routing label and each frame's size and timing — never a
+  message. Many conversations share that relay, so someone who can only see traffic arriving at
+  it — an ISP, a network observer — cannot pick out one conversation as easily as on a host that
+  carries only one. Cloudflare and the project are the opposite case: they see every connection
+  to the relay, so they can line up the same label, address and timing across every session two
+  people have. The Worker's own logging is switched off (`observability` in
+  `server/cloudflare/wrangler.jsonc`; `check:relay-silent` fails if that line changes), but that
+  setting is not the only way to record a Worker's requests — live tailing and log export can be
+  switched on from the account — and what Cloudflare's edge records for its own purposes is
+  Cloudflare's policy, not this project's.
+- **A self-hosted relay has an anonymity set of two.** Whoever runs their own — with `termino
+  serve`, or by deploying the same Worker to their own Cloudflare account — carries one
+  conversation. Every connection to that host is a participant. Finding the host is most of the
+  way to naming both parties — and one of those parties is whoever is paying for it.
+- **The routing label is in the URL.** A client dials `/<label>`, because the Cloudflare relay has
+  to pick the channel before any frame arrives. The relay saw the label anyway, but a URL is what
+  proxies and CDNs record by default, so it is more likely to end up in somebody's logs.
 - **The routing label is fixed for the life of an invite.** It is derived from the invite's
   secret, so it never changes while that invite is in use. Rotating it is possible but manual:
   mint a new invite, which generates a new secret and therefore a new label — and hand it over
@@ -192,15 +207,33 @@ By the same token, a **nickname is not an identity**. It is a label the other pa
 carried inside the encrypted payload. It says which of the two of you is speaking — which the keys
 had already settled — and nothing about who that is in the world.
 
+### Somebody guessing a passphrase
+
+A passphrase room is only as strong as the phrase against somebody who keeps trying. What
+the design takes away is the cheap way to try: the exchange is a PAKE (CPace), so nothing
+recorded from a conversation lets anyone test a guess on their own machine. Each guess has to
+be a live attempt to join the room — or, for whoever runs the relay, a live attempt to sit in
+the middle of one — and a wrong guess fails the session on both screens as "a different invite
+or passphrase, or somebody is in the middle". A phrase that appears on a list of common
+passwords will still be found within a handful of such attempts; the client refuses anything
+under ten characters, which stops only the shortest. The room name is not secret at all: the
+relay sees the address derived from it, and anyone who guesses the name can occupy its places.
+
 ### Anybody who wants to stop you talking
 
 The relay is a single point of failure and nothing authenticates it. A network attacker on the
 path, or the relay itself, can drop or delay messages. `wss://` is required for remote hosts
 (plain `ws://` is refused except to loopback, or under an explicit `--insecure`), which at least
 proves you reached the host you named — but a host that stops forwarding is still a host that
-stops forwarding. The relay also caps itself: 1000 connections in total, 10 from one address, two
-subscribers per label, five frames per ten seconds per connection, and a 120-second idle timeout.
-Somebody spread across enough addresses can still fill those slots. None of that exposes a
+stops forwarding. Both relays cap two subscribers per label and five frames per ten seconds per
+connection — malformed frames included — and treat a connection silent for 120 seconds as gone.
+The self-hosted relay closes such a connection on a timer; the Cloudflare relay closes it the next
+time somebody connects to or sends on that label, which is when its place matters. The
+self-hosted relay also caps 1000 connections in total and 10 open from one address. The
+Cloudflare relay cannot count open connections across labels; instead it refuses an address
+opening more than 30 connections in ten seconds — a limit Cloudflare documents as approximate —
+and holds at most four sockets on one label. Somebody spread across enough addresses can still
+fill those slots, and anyone who knows a label can fill its places first. None of that exposes a
 message; all of it can stop one arriving. Loss is at least made visible rather than silent.
 
 ### The supply chain

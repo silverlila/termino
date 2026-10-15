@@ -46,6 +46,22 @@ export class HandshakeError extends Error {
   }
 }
 
+export interface Exchange {
+  publicKey: Uint8Array;
+  associatedData: Uint8Array | null;
+  complete(theirPublicKey: Uint8Array, theirAssociatedData: Uint8Array | null): SessionKeys;
+}
+
+export function inviteExchange(psk: Uint8Array): Exchange {
+  const ephemeral = startHandshake();
+
+  return {
+    publicKey: ephemeral.publicKey,
+    associatedData: null,
+    complete: (theirPublicKey) => completeHandshake(psk, ephemeral, theirPublicKey),
+  };
+}
+
 export function startHandshake(): EphemeralKeys {
   return x25519.keygen();
 }
@@ -64,22 +80,33 @@ export function completeHandshake(
     );
   }
 
-  const order = compareBytes(myEphemeral.publicKey, theirPublicKey);
-
-  if (order === 0) {
-    throw new HandshakeError("the peer's public key is our own — the hello was reflected back");
-  }
+  refuseReflection(myEphemeral.publicKey, theirPublicKey);
 
   const shared = x25519.getSharedSecret(myEphemeral.secretKey, theirPublicKey);
+  const keys = deriveSessionKeys(shared, psk, SESSION_LABEL, myEphemeral.publicKey, theirPublicKey);
+  shared.fill(0);
 
-  const weSortLower = order < 0;
-  const [lower, higher] = weSortLower
-    ? [myEphemeral.publicKey, theirPublicKey]
-    : [theirPublicKey, myEphemeral.publicKey];
+  return keys;
+}
+
+export function refuseReflection(myPublicKey: Uint8Array, theirPublicKey: Uint8Array): void {
+  if (compareBytes(myPublicKey, theirPublicKey) === 0) {
+    throw new HandshakeError("the peer's public key is our own — the hello was reflected back");
+  }
+}
+
+export function deriveSessionKeys(
+  secret: Uint8Array,
+  salt: Uint8Array | undefined,
+  label: string,
+  myPublicKey: Uint8Array,
+  theirPublicKey: Uint8Array,
+): SessionKeys {
+  const weSortLower = compareBytes(myPublicKey, theirPublicKey) < 0;
+  const [lower, higher] = weSortLower ? [myPublicKey, theirPublicKey] : [theirPublicKey, myPublicKey];
   const transcript = bytesToHex(concatBytes(lower, higher));
 
-  const root = hkdf(sha256, shared, psk, utf8(SESSION_LABEL + transcript), ROOT_BYTES);
-  shared.fill(0);
+  const root = hkdf(sha256, secret, salt, utf8(label + transcript), ROOT_BYTES);
 
   const lowerToHigher = hkdf(sha256, root, undefined, utf8(LO_HI_CHAIN_LABEL), CHAIN_BYTES);
   const higherToLower = hkdf(sha256, root, undefined, utf8(HI_LO_CHAIN_LABEL), CHAIN_BYTES);

@@ -3,14 +3,17 @@ import { generatePsk } from "../shared/crypto/psk.ts";
 import { formatInvite, parseInvite } from "../shared/protocol/invite.ts";
 import {
   checkPromptedNick,
-  inviteRelayUrl,
+  chooseRelay,
   loadRenderer,
   parseArgs,
+  RELAY_ENV,
   SCROLLBACK_WARNING,
   UsageError,
   type JoinCommand,
   type NewCommand,
+  type StartCommand,
 } from "../src/main.ts";
+import { inviteRelayUrl } from "../src/relay-url.ts";
 
 /**
  * The CLI, at the seams a test can reach. `runNew`, `runJoin` and `main` are
@@ -39,14 +42,22 @@ describe("devtools", () => {
   });
 });
 
-function asNew(argv: string[]): NewCommand {
-  const command = parseArgs(argv);
+const NO_ENV = {};
+
+function asNew(argv: string[], env: Record<string, string> = { [RELAY_ENV]: "wss://env.example" }): NewCommand {
+  const command = parseArgs(argv, env);
   if (command.mode !== "new") throw new Error(`expected new, got: ${command.mode}`);
   return command;
 }
 
+function asStart(argv: string[], env: Record<string, string> = { [RELAY_ENV]: "wss://env.example" }): StartCommand {
+  const command = parseArgs(argv, env);
+  if (command.mode !== "start") throw new Error(`expected start, got: ${command.mode}`);
+  return command;
+}
+
 function asJoin(argv: string[]): JoinCommand {
-  const command = parseArgs(argv);
+  const command = parseArgs(argv, NO_ENV);
   if (command.mode !== "join") throw new Error(`expected join, got: ${command.mode}`);
   return command;
 }
@@ -60,11 +71,36 @@ describe("the subcommands", () => {
     });
   });
 
-  it("requires --relay on new, naming the flag", () => {
-    // No silent default: a localhost one would mint invites that work on one
-    // machine and fail as silence everywhere else.
-    expect(() => parseArgs(["new"])).toThrow(UsageError);
-    expect(() => parseArgs(["new"])).toThrow(/--relay/);
+  it("takes new without --relay, meeting on the relay the environment names", () => {
+    expect(asNew(["new"])).toEqual({ mode: "new", nick: undefined, relay: "wss://env.example" });
+  });
+
+  it("opens the start screen when given no subcommand", () => {
+    expect(asStart([])).toEqual({ mode: "start", nick: undefined, relay: "wss://env.example" });
+  });
+
+  it("opens the start screen when given only flags", () => {
+    expect(asStart(["--nick", "alice", "--relay", "relay.example"])).toEqual({
+      mode: "start",
+      nick: "alice",
+      relay: "wss://relay.example",
+    });
+  });
+
+  it("accepts --insecure on the start screen, and needs it there as anywhere", () => {
+    expect(asStart(["--relay", "ws://relay.example.com", "--insecure"]).relay).toBe(
+      "ws://relay.example.com",
+    );
+    expect(() => asStart(["--relay", "ws://relay.example.com"])).toThrow(/--insecure/);
+  });
+
+  it("refuses to start or to mint without a relay from anywhere", () => {
+    expect(() => parseArgs([], NO_ENV)).toThrow(/pass --relay <url> or set TERMINO_RELAY/);
+    expect(() => parseArgs(["new"], NO_ENV)).toThrow(/pass --relay <url> or set TERMINO_RELAY/);
+  });
+
+  it("refuses an unknown flag on the start screen rather than ignoring it", () => {
+    expect(() => parseArgs(["--channel", "demo"], NO_ENV)).toThrow(/unknown option: --channel/);
   });
 
   it("takes join with an invite, and no relay flag", () => {
@@ -76,30 +112,31 @@ describe("the subcommands", () => {
 
     // The relay comes from the invite. Accepting a flag as well would give two
     // answers to one question.
-    expect(() => parseArgs(["join", "acorn@relay.example", "--relay", "wss://elsewhere"])).toThrow(
+    expect(() =>
+      parseArgs(["join", "acorn@relay.example", "--relay", "wss://elsewhere"], NO_ENV),
+    ).toThrow(
       /unknown option: --relay/,
     );
   });
 
   it("requires an invite on join", () => {
-    expect(() => parseArgs(["join"])).toThrow(UsageError);
-    expect(() => parseArgs(["join", "--nick", "alice"])).toThrow(/requires an invite/);
+    expect(() => parseArgs(["join"], NO_ENV)).toThrow(UsageError);
+    expect(() => parseArgs(["join", "--nick", "alice"], NO_ENV)).toThrow(/requires an invite/);
   });
 
   it("rejects --channel as an unknown flag rather than ignoring it", () => {
     // It is gone: the handle is derived from the secret alone, so a channel
     // name would be a second thing to agree out of band that buys nothing.
-    expect(() => parseArgs(["new", "--relay", "wss://relay.example", "--channel", "demo"])).toThrow(
-      /unknown option: --channel/,
-    );
-    expect(() => parseArgs(["join", "acorn@relay.example", "--channel", "demo"])).toThrow(
+    expect(() =>
+      parseArgs(["new", "--relay", "wss://relay.example", "--channel", "demo"], NO_ENV),
+    ).toThrow(/unknown option: --channel/);
+    expect(() => parseArgs(["join", "acorn@relay.example", "--channel", "demo"], NO_ENV)).toThrow(
       /unknown option: --channel/,
     );
   });
 
   it("rejects anything that is not one of the three subcommands", () => {
-    expect(() => parseArgs(["chat"])).toThrow(/expected new, join or serve/);
-    expect(() => parseArgs([])).toThrow(/expected new, join or serve/);
+    expect(() => parseArgs(["chat"], NO_ENV)).toThrow(/expected new, join or serve/);
   });
 
   it("serves on a port", () => {
@@ -150,6 +187,42 @@ describe("the relay an invite is dialled on", () => {
   });
 });
 
+describe("which relay a new chat meets on", () => {
+  const ENV = { [RELAY_ENV]: "wss://env.example" };
+
+  it("is --relay over the environment over the default", () => {
+    expect(chooseRelay("wss://flag.example", ENV, false, "wss://default.example")).toBe(
+      "wss://flag.example",
+    );
+    expect(chooseRelay(undefined, ENV, false, "wss://default.example")).toBe("wss://env.example");
+    expect(chooseRelay(undefined, NO_ENV, false, "wss://default.example")).toBe(
+      "wss://default.example",
+    );
+  });
+
+  it("treats an empty TERMINO_RELAY as unset", () => {
+    expect(chooseRelay(undefined, { [RELAY_ENV]: "" }, false, "wss://default.example")).toBe(
+      "wss://default.example",
+    );
+  });
+
+  it("fails naming both ways to set one when there is none", () => {
+    expect(() => chooseRelay(undefined, NO_ENV, false, undefined)).toThrow(UsageError);
+    expect(() => chooseRelay(undefined, NO_ENV, false, undefined)).toThrow(/--relay.*TERMINO_RELAY/);
+  });
+
+  it("holds the environment to the same rules as the flag, naming the variable", () => {
+    const remote = { [RELAY_ENV]: "ws://relay.example.com:8787" };
+
+    expect(() => chooseRelay(undefined, remote, false)).toThrow(/^TERMINO_RELAY .*--insecure/);
+    expect(chooseRelay(undefined, remote, true)).toBe("ws://relay.example.com:8787");
+    expect(() => chooseRelay(undefined, { [RELAY_ENV]: "http://relay.example" }, false)).toThrow(
+      /TERMINO_RELAY must be ws:\/\/ or wss:\/\//,
+    );
+    expect(chooseRelay(undefined, { [RELAY_ENV]: "relay.example" }, false)).toBe("wss://relay.example");
+  });
+});
+
 describe("relay url", () => {
   const relayOf = (argv: string[]) => asNew(["new", ...argv]).relay;
 
@@ -181,6 +254,20 @@ describe("relay url", () => {
     expect(relayOf(["--insecure", "--relay", "ws://relay.example.com:8787"])).toBe(
       "ws://relay.example.com:8787",
     );
+  });
+
+  it("keeps the address alone, dropping a trailing slash", () => {
+    expect(relayOf(["--relay", "wss://relay.example.com/"])).toBe("wss://relay.example.com");
+  });
+
+  it("refuses a path, a query or a user, which the invite would silently drop", () => {
+    expect(() => relayOf(["--relay", "wss://relay.example.com/chat"])).toThrow(/no path or query/);
+    expect(() => relayOf(["--relay", "wss://relay.example.com/?x=1"])).toThrow(/no path or query/);
+    expect(() => relayOf(["--relay", "wss://me@relay.example.com"])).toThrow(/no path or query/);
+  });
+
+  it("names control characters in a relay it refuses rather than echoing them", () => {
+    expect(() => relayOf(["--relay", "wss://relay.example.com/\u001B[2J"])).toThrow(/<U\+001B>\[2J/);
   });
 
   it("refuses a scheme that is not ws or wss", () => {
