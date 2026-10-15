@@ -8,7 +8,8 @@
  * it line by line; test/shared/crypto/cpace.test.ts runs the draft's appendix B.3
  * vectors. Party roles are symmetric here, so the transcript is the ordered one (o_cat),
  * and each side's associated data must be unique (draft §10.1) — callers pass fresh
- * random bytes.
+ * random bytes. `calculateGenerator` zero-pads so DSI and PRS fill the first SHA-512
+ * block alone, as the draft specifies, so hashing time does not depend on password length.
  *
  * Scalars are bigints, which JavaScript gives no way to overwrite: unlike the byte
  * buffers elsewhere in shared/crypto/, a scalar is gone only when it is collected.
@@ -26,7 +27,6 @@ const DSI = new TextEncoder().encode("CPaceRistretto255");
 const DSI_ISK = new TextEncoder().encode("CPaceRistretto255_ISK");
 const ORDERED = new TextEncoder().encode("oc");
 
-// SHA-512 consumes its input in 128-byte blocks.
 const HASH_BLOCK_BYTES = 128;
 const SCALAR_BYTES = 32;
 
@@ -36,7 +36,6 @@ export class CPaceError extends Error {
   }
 }
 
-/** The draft's LEB128-prefixed length-value encoding. */
 export function lvCat(...parts: Uint8Array[]): Uint8Array {
   return concatBytes(...parts.map(prependLength));
 }
@@ -56,8 +55,6 @@ function prependLength(data: Uint8Array): Uint8Array {
 }
 
 export function calculateGenerator(prs: Uint8Array, ci: Uint8Array, sid: Uint8Array): Point {
-  // The zero padding fills the hash's first block with DSI and PRS alone, so the time
-  // spent hashing does not depend on how long the password is.
   const padding = Math.max(
     0,
     HASH_BLOCK_BYTES - prependLength(prs).length - prependLength(DSI).length - 1,
@@ -67,7 +64,6 @@ export function calculateGenerator(prs: Uint8Array, ci: Uint8Array, sid: Uint8Ar
   return ristretto255_hasher.deriveToCurve!(sha512(generatorString));
 }
 
-/** The draft's recommended sampling: 32 random bytes with the bits above 252 cleared. */
 export function sampleScalar(): bigint {
   for (;;) {
     const bytes = crypto.getRandomValues(new Uint8Array(SCALAR_BYTES));
@@ -87,8 +83,6 @@ export function scalarMult(scalar: bigint, generator: Point): Uint8Array {
   return generator.multiply(scalar % Point.Fn.ORDER).toBytes();
 }
 
-/** The shared point, or a refusal: a share that does not decode, or that lands on the
- * identity, is exactly what an attacker sends to learn something. */
 export function scalarMultVerified(scalar: bigint, theirShare: Uint8Array): Uint8Array {
   let decoded: Point;
   try {
@@ -103,7 +97,6 @@ export function scalarMultVerified(scalar: bigint, theirShare: Uint8Array): Uint
   return shared.toBytes();
 }
 
-/** The intermediate session key, from the shared point and the ordered transcript. */
 export function intermediateSessionKey(
   sid: Uint8Array,
   sharedPoint: Uint8Array,

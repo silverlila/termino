@@ -66,7 +66,6 @@ export interface Passphrase {
   phrase: string;
 }
 
-/** Exactly one secret: a generated invite's, or a room and the phrase both people know. */
 export type SessionSecret =
   | { psk: Uint8Array; passphrase?: never }
   | { passphrase: Passphrase; psk?: never };
@@ -93,8 +92,6 @@ export class SessionClosedError extends Error {
   }
 }
 
-/** Counted from the peer's hello, not from connecting: the invite travels by hand, and
- * being alone until it arrives is the ordinary case rather than a failure. */
 export const HANDSHAKE_TIMEOUT_MS = 20_000;
 
 export const PING_INTERVAL_MS = 15_000;

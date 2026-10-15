@@ -1,16 +1,17 @@
 /**
- * Passphrase mode: two people who share a phrase, rather than a generated invite, meet in
- * a named room. docs/security-design.md §10 explains why this cannot be v1 again.
+ * Passphrase rooms: a room name and a phrase both people know, in place of a generated
+ * invite.
  *
- * The room name is routing and nothing more. It is not secret — the relay sees the handle
- * derived from it, and a common name can be guessed — so the handle never touches the
- * passphrase: a handle derived from the passphrase is exactly v1's offline oracle.
+ * The room name is routing only: it is not secret, and the relay sees the handle derived
+ * from it. The handle never touches the passphrase, because a handle derived from the
+ * passphrase is v1's offline oracle (docs/security-design.md §10). The passphrase enters
+ * only CPace's generator.
  *
- * The passphrase enters only CPace's generator. Room and phrase are normalised the way a
- * person would expect two typings to agree: NFKC and trimmed, and the room — but not the
- * phrase — also has its runs of spaces collapsed and its case folded. Lowercasing alone is
- * not a fold for Greek: "Σ" lowers to "ς" or "σ" depending on its neighbours, so the
- * final form is folded to "σ" afterwards.
+ * CPace runs with an empty sid, which the draft allows (§10, [BGHJ24]); uniqueness comes
+ * from each side's fresh share and associated data.
+ *
+ * `toLowerCase` does not fold Greek: "Σ" lowers to "ς" or "σ" depending on its
+ * neighbours, so final sigma is mapped to "σ" afterwards.
  */
 
 import { hkdf } from "@noble/hashes/hkdf.js";
@@ -26,8 +27,6 @@ import {
 } from "./cpace.ts";
 import { deriveSessionKeys, HandshakeError, refuseReflection, type Exchange } from "./handshake.ts";
 
-// Wire contract: two clients with different labels never meet, and fail as if nobody
-// were there. Each differs from every invite-mode label, so the two modes cannot collide.
 export const ROOM_HANDLE_LABEL = "termino/room/v2";
 export const PASSPHRASE_CHANNEL_LABEL = "termino/passphrase/v2";
 export const PASSPHRASE_SESSION_LABEL = "termino/session/passphrase/v2";
@@ -36,8 +35,6 @@ const HANDLE_BYTES = 16;
 
 export const ASSOCIATED_DATA_BYTES = 16;
 
-// No session id is agreed before the exchange, which the draft allows (§10, [BGHJ24]);
-// uniqueness comes from each side's fresh share and associated data instead.
 const SID = new Uint8Array(0);
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
@@ -56,7 +53,6 @@ export function deriveRoomHandle(room: string): string {
   );
 }
 
-/** The point both sides build their shares on: the phrase picks it, within the room. */
 export function passphraseGenerator(room: string, passphrase: string): Uint8Array {
   return generatorFor(room, passphrase).toBytes();
 }

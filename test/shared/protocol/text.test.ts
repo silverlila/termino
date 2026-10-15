@@ -110,8 +110,6 @@ describe("a room name", () => {
   });
 
   it("refuses a zero-width character, which would route the two typings apart unseen", () => {
-    // "silver" and "sil<U+200B>ver" look the same and derive different handles, so each
-    // side would wait alone with nothing on screen to say why.
     expect(roomProblem("sil​ver")).toContain("U+200B");
     expect(roomProblem("silver﻿")).toContain("U+FEFF");
   });
@@ -121,14 +119,12 @@ describe("a passphrase", () => {
   it("needs ten characters, counted as a person counts them", () => {
     expect(passphraseProblem("hunter2")).toContain("at least 10 characters");
     expect(passphraseProblem("  short  ")).toContain("at least 10 characters");
-    // Ten emoji are ten characters, not twenty UTF-16 units.
     expect(passphraseProblem("🐙".repeat(9))).toContain("at least 10 characters");
     expect(passphraseProblem("🐙".repeat(10))).toBeNull();
     expect(passphraseProblem("the blue house")).toBeNull();
   });
 
   it("counts the phrase the exchange will use, after normalising it", () => {
-    // Ten code points typed, five characters keyed: "e" plus a combining accent, five times.
     expect(passphraseProblem("e\u0301".repeat(5))).toContain("at least 10 characters");
   });
 

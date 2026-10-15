@@ -42,7 +42,6 @@ describe("devtools", () => {
   });
 });
 
-// No test may read the developer's own TERMINO_RELAY.
 const NO_ENV = {};
 
 function asNew(argv: string[], env: Record<string, string> = { [RELAY_ENV]: "wss://env.example" }): NewCommand {
@@ -202,7 +201,6 @@ describe("which relay a new chat meets on", () => {
   });
 
   it("treats an empty TERMINO_RELAY as unset", () => {
-    // `TERMINO_RELAY= termino` is how a shell clears a variable for one run.
     expect(chooseRelay(undefined, { [RELAY_ENV]: "" }, false, "wss://default.example")).toBe(
       "wss://default.example",
     );
@@ -214,8 +212,6 @@ describe("which relay a new chat meets on", () => {
   });
 
   it("holds the environment to the same rules as the flag, naming the variable", () => {
-    // A relay read from the environment is one the person never typed this
-    // run, so the error has to say where it came from.
     const remote = { [RELAY_ENV]: "ws://relay.example.com:8787" };
 
     expect(() => chooseRelay(undefined, remote, false)).toThrow(/^TERMINO_RELAY .*--insecure/);
@@ -265,8 +261,6 @@ describe("relay url", () => {
   });
 
   it("refuses a path, a query or a user, which the invite would silently drop", () => {
-    // The invite carries the host and nothing else: whoever starts the chat
-    // would dial the path, and whoever joins it would not.
     expect(() => relayOf(["--relay", "wss://relay.example.com/chat"])).toThrow(/no path or query/);
     expect(() => relayOf(["--relay", "wss://relay.example.com/?x=1"])).toThrow(/no path or query/);
     expect(() => relayOf(["--relay", "wss://me@relay.example.com"])).toThrow(/no path or query/);

@@ -1,3 +1,9 @@
+/**
+ * OpenTUI's `copyToClipboardOSC52` reports success unless the terminal said otherwise, so
+ * a terminal that silently drops OSC 52 looks the same as one that copied — which is why
+ * the copy notice says what to do if pasting gives nothing.
+ */
+
 import { useRenderer } from "@opentui/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConnectionState, Session, SessionHandlers } from "../session.ts";
@@ -73,8 +79,6 @@ const THIRD_PARTY_NOTICE = "⚠ a third party tried to join this channel";
 
 const NO_INVITE_NOTICE = "there is no invite to copy — you joined with someone else's";
 
-// OpenTUI reports OSC 52 as available unless the terminal said otherwise, so a
-// terminal that silently drops it is indistinguishable from one that copied.
 const COPIED_NOTICE =
   "invite sent to the clipboard — if pasting gives nothing, select it with the mouse; " +
   "clear your clipboard once it is pasted, since clipboard history keeps it";

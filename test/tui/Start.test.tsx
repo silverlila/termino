@@ -4,12 +4,6 @@ import { Start } from "../../src/tui/Start.tsx";
 import { wait } from "../support/harness.ts";
 import { closeChats, mount, pressEnter, seeOnScreen, submit, type Screen } from "../support/tui.tsx";
 
-/**
- * The start screen on its own: what it asks, what it refuses, and where Esc takes you.
- * Nothing here connects — choosing hands a chat to `onChosen`, and what happens next is
- * Termino.test.tsx's business.
- */
-
 const RELAY = "wss://relay.example:8787";
 
 interface Started {
@@ -37,9 +31,6 @@ async function mountStart(nick?: string, meetings: string[] = []): Promise<Start
   return { screen, chosen };
 }
 
-// React commits a step change on its own schedule, after the key that caused it,
-// and keys sent before the new step's widget mounts land on nothing — so each
-// step change waits to see the step's own words before typing into it.
 async function chooseJoin(screen: Screen): Promise<void> {
   await seeOnScreen(screen, "What do you want to do?");
   await pressDown(screen);
@@ -96,8 +87,6 @@ describe("the name", () => {
   });
 
   it("is held to the same rule as --nick", async () => {
-    // The status bar draws the name unescaped, so the screen that asks for it
-    // cannot be a way around the check the flag goes through.
     const { screen } = await mountStart();
 
     await submit(screen, "a".repeat(33));
@@ -172,7 +161,6 @@ describe("joining a chat", () => {
 
     await submit(screen, `  ${invite}  `);
 
-    // Pasted with the spaces a terminal selection tends to carry.
     expect(chosen).toHaveLength(1);
     expect(chosen[0]?.nick).toBe("bob");
     expect(chosen[0]?.chat.invite).toBeNull();
@@ -221,11 +209,9 @@ describe("meeting with a passphrase", () => {
     screen.mockInput.pressBackspace();
 
     await seeOnScreen(screen, "••");
-    // The field is padded to its border, so two dots then spaces: never a third dot.
     expect(screen.captureCharFrame()).toMatch(/│ •• +│/);
   });
 
-  /** What the field hands over on Enter, read through the seam it hands it to. */
   async function submitted(screen: Screen, chosen: Started["chosen"], meetings: string[]): Promise<string> {
     await pressEnter(screen);
     expect(chosen).toHaveLength(1);
@@ -340,13 +326,10 @@ describe("Esc", () => {
     const { screen, chosen } = await mountStart("alice");
 
     await pressEscape(screen);
-    // Absence needs time to have been possible: React commits a step change
-    // after the key that caused it.
     await wait(80);
     await screen.renderOnce();
     expect(screen.captureCharFrame()).not.toContain("Your name");
 
-    // And the list is still the thing taking keys.
     await pressEnter(screen);
     expect(chosen[0]?.nick).toBe("alice");
   });

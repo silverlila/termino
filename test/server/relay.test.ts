@@ -125,7 +125,6 @@ afterEach(() => {
 });
 
 describe("the contract every relay keeps", () => {
-  // Its own relay on the real clock: the contract cannot advance an injected one.
   let contracted: ReturnType<typeof startRelay>;
 
   beforeEach(() => {
@@ -247,9 +246,6 @@ describe("writing nothing", () => {
       alice.sendRaw("{not json");
       await until(() => framesOfType(alice, "err").length === 1);
 
-      // This relay runs on the real clock, so the window cannot be skipped
-      // past: subscribing, one message and one malformed frame leave alice two
-      // tokens of five, and these five exhaust them.
       for (let sent = 1; sent <= RATE_LIMIT_MESSAGES; sent++) {
         alice.send(msgFrame(HANDLE, sent, CIPHERTEXT));
       }

@@ -791,14 +791,10 @@ describe("a peer's presence", () => {
 
 describe("a handshake timeout", () => {
   it("defaults to twenty seconds", () => {
-    // Counted from the peer's hello: long enough for a slow network, short
-    // enough that a handshake somebody is sitting in the middle of is reported.
     expect(HANDSHAKE_TIMEOUT_MS).toBe(20_000);
   });
 
   it("does not run while nobody else is here, so a slow joiner still gets in", async () => {
-    // The invite travels by hand. Being alone until it arrives is the ordinary
-    // case, not a failure; the clock is for a handshake that started and stalled.
     const alice = startSession({
       psk: PSK,
       nick: "alice",
@@ -928,7 +924,6 @@ describe("a passphrase room", () => {
   });
 
   it("fails on both sides, out loud, when the phrases differ", async () => {
-    // The one guess a wrong phrase gets is this live attempt, and it is seen.
     const refusals = await Promise.all([
       rejection(
         startSession({

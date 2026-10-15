@@ -1,7 +1,4 @@
 /**
- * The self-hosted relay on Bun: applies channel.ts's rules to its sockets and caps
- * connections per address and overall. It holds no key and can decrypt nothing.
- *
  * Bun specifics this file is shaped around: an exception escaping a fetch or socket
  * handler is printed with a stack trace, and the frame, handle and sender address are
  * in scope when it is — which is why failures here report nothing about whom. `fetch`

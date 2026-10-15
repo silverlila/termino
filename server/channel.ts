@@ -1,17 +1,11 @@
 /**
- * The rules for one channel, shared by both relays: the Bun server in relay.ts and the
- * Cloudflare Durable Object in cloudflare/worker.ts. Pure — each relay owns its sockets
- * and acts on the decision this returns.
+ * The rules for one channel, shared by relay.ts and cloudflare/worker.ts; each owns its
+ * sockets and acts on the decision this returns.
  *
- * A connection is pinned to one handle by the path it dialled, `/<handle>`, because a
- * Durable Object has to be chosen before any frame arrives. Every frame it sends must
- * then name that handle: the relay routes on the handle the connection subscribed to,
- * never the handle inside the frame, and a mismatch is answered `bad_frame`.
- *
- * Every frame costs a token, malformed or not: a frame the relay has to read is work
- * whatever it turns out to say, and on Cloudflare it is billed. A sender over budget is
- * told once per stretch of being over it, not once per frame, so the relay cannot be
- * made to answer a flood with a flood.
+ * A Durable Object must be chosen before any frame arrives, so a connection is pinned to
+ * one handle by its dial path, `/<handle>`. Cloudflare bills every frame it has to read,
+ * which is why a malformed frame costs a token too. Browsers always send an Origin header
+ * on a WebSocket handshake and the CLI never does, so any Origin is refused.
  */
 
 import {
@@ -69,7 +63,6 @@ export function newMember(handle: string, now: number): Member {
   return { handle, subscribed: false, bucket: fullBucket(now), limited: false };
 }
 
-// Browsers attach an Origin header to a WebSocket handshake; the CLI never does.
 export function admit(url: URL, headers: Headers): Admission {
   const handle = url.pathname.slice(1);
   if (!isHandle(handle) || url.search !== "") return { ok: false, reason: "only /<handle> is served" };

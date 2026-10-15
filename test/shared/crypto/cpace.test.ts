@@ -11,13 +11,6 @@ import {
   scalarMultVerified,
 } from "../../../shared/crypto/cpace.ts";
 
-/**
- * Known answers from draft-irtf-cfrg-cpace-21, appendix A.1.2 (prepend_len) and B.3
- * (ristretto255 with SHA-512). Every expected value below is copied from the draft, not
- * computed — a CPace that agrees with itself but not with the draft would talk only to
- * copies of itself, and would have no claim to the draft's security proof.
- */
-
 const utf8 = (text: string) => new TextEncoder().encode(text);
 
 const PRS = utf8("Password");
@@ -35,7 +28,6 @@ describe("the length-value encoding", () => {
   it("prefixes each part with its LEB128 length (A.1.2)", () => {
     expect(bytesToHex(lvCat(new Uint8Array()))).toBe("00");
     expect(bytesToHex(lvCat(utf8("1234")))).toBe("0431323334");
-    // bytes(range(127)) still fits a one-byte length; bytes(range(128)) needs two.
     const range = (length: number) => Uint8Array.from({ length }, (_, index) => index);
     expect(lvCat(range(127)).length).toBe(128);
     expect(bytesToHex(lvCat(range(127))).slice(0, 6)).toBe("7f0001");
@@ -108,7 +100,6 @@ describe("the intermediate session key", () => {
       "2244675c0b43397cbb68d342b01fc0f98fc961469a25134de9f0f813c1a57476";
 
     expect(bytesToHex(intermediateSessionKey(SID, hexToBytes(SHARED_POINT), a, b))).toBe(expected);
-    // Ordered, so each side computes it with its own share first and still agrees.
     expect(bytesToHex(intermediateSessionKey(SID, hexToBytes(SHARED_POINT), b, a))).toBe(expected);
   });
 });

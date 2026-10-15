@@ -1,6 +1,4 @@
 /**
- * The CLI: argument parsing, help, relay URL resolution, and process wiring for the TUI.
- *
  * @opentui/react reads DEV at module evaluation: on "true" it loads react-devtools-core,
  * which serialises the element tree to a WebSocket on localhost. DEV is cleared before
  * that import.
@@ -316,8 +314,6 @@ async function runChat(chat: Chat, given: string | undefined): Promise<void> {
   );
 }
 
-// The renderer is loaded before any component: importing a .tsx file evaluates
-// @opentui/react, which reads DEV as it loads.
 async function openScreen() {
   const { createCliRenderer } = await import("@opentui/core");
   const { createElement, createRoot } = await loadRenderer();

@@ -1,7 +1,6 @@
 /**
  * The ephemeral X25519 exchange, folded with the pre-shared key to produce the session
- * root, the two chain keys and the SAS. Passphrase mode (passphrase.ts) replaces the
- * exchange with CPace and shares everything from the root down — `deriveSessionKeys`.
+ * root, the two chain keys and the SAS.
  *
  * @noble/curves rejects a low-order peer key: `x25519.getSharedSecret` throws rather than
  * returning the all-zero shared secret such a key produces. That failure leaves this file
@@ -47,8 +46,6 @@ export class HandshakeError extends Error {
   }
 }
 
-/** One side of a key exchange, whichever kind: what goes in its hello, and how the
- * other side's hello turns into session keys. */
 export interface Exchange {
   publicKey: Uint8Array;
   associatedData: Uint8Array | null;
@@ -98,11 +95,6 @@ export function refuseReflection(myPublicKey: Uint8Array, theirPublicKey: Uint8A
   }
 }
 
-/**
- * From an exchange's output to the session: the root binds both public keys, sorted, into
- * its info, and direction is decided by the same sort — never by who connected first,
- * which the relay controls.
- */
 export function deriveSessionKeys(
   secret: Uint8Array,
   salt: Uint8Array | undefined,

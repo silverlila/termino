@@ -15,16 +15,16 @@ import {
 } from "../../support/relay-contract.ts";
 
 /**
- * The Cloudflare relay, run in Cloudflare's own runtime (workerd) through `wrangler dev`
- * on a loopback port: the same contract as the Bun relay, what only this relay has, and
- * a real client session across it. No request goes to a relay on Cloudflare's network.
+ * The Cloudflare relay, run in workerd through `wrangler dev` on a loopback port: the
+ * shared relay contract, what only this relay has, and a real client session across it.
  *
- * It runs wrangler.jsonc's `test` environment, where the per-address connection limit is
- * raised — every connection here comes from one address — and idle reaping takes three
- * seconds rather than two minutes. Wrangler's local state goes to a temporary directory,
- * not the source tree.
+ * It runs wrangler.jsonc's `test` environment, which raises the per-address connection
+ * limit (every connection here comes from one address) and cuts idle reaping to three
+ * seconds. Wrangler environments do not inherit bindings, so that environment repeats them.
  *
- * Starting workerd takes a second or two, once for the file.
+ * Wrangler logs every request, so its stdout and stderr are read to the end: a pipe nobody
+ * drains fills and blocks it mid-suite. It runs with WRANGLER_SEND_METRICS=false, since
+ * otherwise it prompts for telemetry consent and then reports usage to Cloudflare.
  */
 
 const IDLE_TIMEOUT_MS = 3000;
@@ -43,8 +43,6 @@ function freePort(): number {
   return found;
 }
 
-// Read to the end, not just to "Ready on": wrangler logs every request, and a pipe
-// nobody drains fills and blocks it mid-suite.
 async function drain(stream: ReadableStream<Uint8Array>, sink: { text: string }): Promise<void> {
   const decoder = new TextDecoder();
   for await (const chunk of stream) sink.text += decoder.decode(chunk, { stream: true });
@@ -62,9 +60,6 @@ async function ready(output: { text: string }, exited: Promise<number>): Promise
   }
 }
 
-// Started while the file loads rather than in beforeAll: a hook is held to the test
-// timeout, five seconds by default, and workerd can take longer than that on a busy
-// machine. It has its own deadline instead.
 port = freePort();
 const state = mkdtempSync(join(tmpdir(), "termino-wrangler-"));
 const wrangler = Bun.spawn(
@@ -88,7 +83,6 @@ const wrangler = Bun.spawn(
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    // Wrangler otherwise asks, and then reports usage to Cloudflare.
     env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
   },
 );
@@ -140,7 +134,6 @@ describe("a passphrase room across the cloudflare relay", () => {
     const one = passphraseChat(relayUrl, `room ${freshHandle()}`, "the blue house on the corner");
     if (!one.ok) throw new Error(one.reason);
 
-    // One room and phrase, two people: each connect runs its own fresh exchange.
     const sessions = await Promise.all([one.chat.connect("alice", {}), one.chat.connect("bob", {})]);
     try {
       expect(sessions[0]?.sasWords).toBe(sessions[1]?.sasWords);
@@ -160,7 +153,6 @@ describe("what only the cloudflare relay has", () => {
 
     try {
       await expect(openSocket(ws(handle))).rejects.toThrow("refused");
-      // Another channel is untouched by this one being full.
       held.push(await openSocket(ws(freshHandle())));
     } finally {
       for (const socket of held) socket.close();
@@ -168,8 +160,6 @@ describe("what only the cloudflare relay has", () => {
   });
 
   it("gives a silent subscriber's place to somebody new once it has been idle too long", async () => {
-    // A client pings every fifteen seconds; silence past the timeout means one that died
-    // without closing. Without reaping, the two dead places would answer channel_full.
     const handle = freshHandle();
     const dead = [await openSocket(ws(handle)), await openSocket(ws(handle))];
     for (const socket of dead) socket.send(encodeFrame(subFrame(handle)));
@@ -189,7 +179,6 @@ describe("what only the cloudflare relay has", () => {
   });
 
   it("refuses an address that opens connections faster than a person does", async () => {
-    // Last in the file: it spends the address's whole budget for the next ten seconds.
     let refusal = "";
     for (let sent = 0; sent < 1000 && refusal === ""; sent++) {
       const response = await fetch(`http://127.0.0.1:${port}/${freshHandle()}`);

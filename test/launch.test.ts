@@ -3,11 +3,6 @@ import { joinChat, newChat, passphraseChat } from "../src/launch.ts";
 import type { IncomingMessage, Session } from "../src/session.ts";
 import { startTestRelay, unlimitedClock, wait, type TestRelay } from "./support/harness.ts";
 
-/**
- * The two ways into a chat, without a screen: what `newChat` hands the person who
- * starts one has to be exactly what `joinChat` needs to reach them.
- */
-
 let relay: TestRelay;
 const sessions: Session[] = [];
 
@@ -76,8 +71,6 @@ describe("joining a chat", () => {
   });
 
   it("names control characters in a reason instead of passing them to the screen", () => {
-    // A hostile 'invite' is a way to put bytes on somebody's terminal: the
-    // reason quotes the word it could not read.
     expect(joinChat("a\u001B]52;c;ZXZpbA==\u0007b@relay.example")).toEqual({
       ok: false,
       reason: "not a word from the list: a<U+001B>]52;c;ZXZpbA==<U+0007>b",
@@ -85,8 +78,6 @@ describe("joining a chat", () => {
   });
 
   it("refuses a mistyped word, a short invite and a spaced one with a reason", () => {
-    // `join` used to let all three escape as a stack trace: only the host
-    // errors were turned into a usage message.
     expect(joinChat("acorn-zzzz@relay.example")).toEqual({
       ok: false,
       reason: "not a word from the list: zzzz",

@@ -21,21 +21,24 @@
  *
  * An exception escaping a handler is recorded by Cloudflare with the request URL, and the
  * URL carries the handle, so every handler catches everything.
+ *
+ * `getWebSockets()` keeps a socket this object has closed until the close handshake
+ * finishes, so only sockets in the OPEN state count toward a channel's room.
+ *
+ * wrangler.jsonc: `nodejs_compat` is required because frame.ts reads base64 and UTF-8
+ * through Buffer, and the migration declares Channel SQLite-backed because the free plan
+ * offers only that kind of Durable Object. Nothing is stored in it.
  */
 
 import { DurableObject } from "cloudflare:workers";
 import { encodeFrame, errFrame, type ErrorCode } from "../../shared/protocol/frame.ts";
 import { admit, IDLE_TIMEOUT_SECONDS, newMember, route, type Member } from "../channel.ts";
 
-// Two participants, a third to be told channel_full, and one spare for a reconnect
-// racing the close of the socket it replaces.
 const MAX_SOCKETS_PER_CHANNEL = 4;
 
 interface Env {
   CHANNEL: DurableObjectNamespace<Channel>;
   CONNECTIONS_PER_ADDRESS: RateLimit;
-  // Set only by the test environment in wrangler.jsonc, so idle reaping can be observed
-  // without waiting two minutes.
   IDLE_TIMEOUT_SECONDS?: string;
 }
 
@@ -108,10 +111,7 @@ export class Channel extends DurableObject<Env> {
     const state = attachmentOf(ws);
     const frame = typeof raw === "string" ? raw : new Uint8Array(raw);
 
-    // A stale subscriber holds a place a new one might be asking for. The sender has
-    // just been heard from, so it is not one of them.
     this.forgetIdle(now, ws);
-    // Only a subscribed sender is forwarded for, so this list already holds it then.
     const subscribers = this.subscribers();
     const decided = route(state.member, frame, subscribers.length, now);
     attach(ws, { member: decided.member, lastHeard: now });
@@ -129,16 +129,10 @@ export class Channel extends DurableObject<Env> {
     return this.live().filter((socket) => attachmentOf(socket).member.subscribed);
   }
 
-  // A socket this object closed stays in getWebSockets() until the close handshake
-  // finishes, and must not hold a place in the meantime.
   private live(): WebSocket[] {
     return this.ctx.getWebSockets().filter((socket) => socket.readyState === WebSocket.OPEN);
   }
 
-  // A client pings every fifteen seconds, so silence for the idle timeout means a
-  // connection that died without closing. The Bun relay has Bun's idleTimeout for this;
-  // here it is checked whenever the channel is next touched, which costs nothing while
-  // nobody is.
   private forgetIdle(now: number, heard?: WebSocket): void {
     const idleMs = Number(this.env.IDLE_TIMEOUT_SECONDS ?? IDLE_TIMEOUT_SECONDS) * 1000;
 

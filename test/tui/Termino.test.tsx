@@ -12,11 +12,6 @@ import {
   type Screen,
 } from "../support/tui.tsx";
 
-/**
- * From the start screen into a live chat, against a real relay: the invite the
- * starter is shown has to be the one that brings the other person in.
- */
-
 let relay: TestRelay;
 const sessions: Session[] = [];
 
@@ -47,7 +42,6 @@ async function mountTermino(nick: string): Promise<Screen> {
   );
 }
 
-/** Stands in for the terminal at the one place the screen touches it: the clipboard. */
 function clipboardOf(screen: Screen, accepts: boolean): string[] {
   const copied: string[] = [];
   screen.renderer.copyToClipboardOSC52 = (text: string) => {
@@ -68,7 +62,6 @@ async function joinThroughScreen(nick: string, invite: string): Promise<Screen> 
   return screen;
 }
 
-/** The invite as drawn in its panel, with the panel's wrapping squeezed out. */
 function inviteOn(frame: string): string {
   const match = /([a-z]+(?:-[a-z│\s]+)+@[\w.:[\]]+)/.exec(frame.replace(/│/g, ""));
   return (match?.[1] ?? "").replace(/\s+/g, "");
@@ -104,8 +97,6 @@ describe("starting a chat from the start screen", () => {
   });
 
   it("stops showing the invite once the other person is in", async () => {
-    // Nobody needs it after that, and it is the whole secret: it should not
-    // stay on a screen somebody might glance at for the rest of the chat.
     const { screen, invite } = await startChat("alice");
     const joined = joinChat(invite);
     if (!joined.ok) throw new Error(joined.reason);
@@ -146,8 +137,6 @@ describe("starting a chat from the start screen", () => {
 
 describe("joining a chat from the start screen", () => {
   it("shows no invite panel while waiting, having none to show", async () => {
-    // Nobody has started this chat, so the handshake never completes and the
-    // screen stays in the state the panel would appear in.
     const screen = await joinThroughScreen("bob", newChat(relay.url).invite ?? "");
 
     const frame = await seeOnScreen(screen, "waiting for the other side");
@@ -191,13 +180,8 @@ async function meetThroughScreen(nick: string, room: string, phrase: string): Pr
 
 describe("meeting with a passphrase from the start screen", () => {
   it("shows a mismatched phrase as a failure, never as a session", async () => {
-    // The peer's confirm cannot be opened, which the screen says at once; the alarm
-    // naming a possible man in the middle follows at the handshake timeout, which the
-    // session tests cover rather than this one waiting twenty seconds.
     const other = passphraseChat(relay.url, "silver-and-ana", "the blue house on the corner");
     if (!other.ok) throw new Error(other.reason);
-    // It waits out its own handshake timeout and fails when the relay stops; caught here
-    // so that failure is not an unhandled rejection.
     void other.chat.connect("mallory", {}).catch(() => undefined);
 
     const screen = await meetThroughScreen("alice", "silver-and-ana", "a different phrase entirely");

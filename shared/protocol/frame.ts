@@ -13,7 +13,6 @@ export const MAX_FRAME_BYTES = 8192;
 
 const PUBLIC_KEY_BYTES = 32;
 
-// A passphrase room's hello carries CPace's associated data; an invite's carries none.
 const ASSOCIATED_DATA_BYTES = 16;
 
 const MAX_COUNTER = 0xffffffff;

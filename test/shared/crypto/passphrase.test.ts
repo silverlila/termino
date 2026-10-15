@@ -13,12 +13,6 @@ import {
 } from "../../../shared/crypto/passphrase.ts";
 import { deriveHandle } from "../../../shared/crypto/psk.ts";
 
-/**
- * Passphrase mode without a network: two exchanges on the same room and phrase agree, and
- * anything else — another phrase, a reflected hello, a share that is not a point — does
- * not, and says so.
- */
-
 const ROOM = "silver-and-ana";
 const PHRASE = "the blue house on the corner";
 
@@ -76,8 +70,6 @@ describe("the same phrase", () => {
 
 describe("a different phrase", () => {
   it("produces keys that do not match, rather than an error either side could test", () => {
-    // Nothing distinguishes a wrong phrase at this layer: the keys silently differ, and
-    // the encrypted confirm that follows is what fails, live and visibly.
     const [alice, mallory] = meet(
       passphraseExchange(ROOM, PHRASE),
       passphraseExchange(ROOM, "the blue house on the corneR"),
@@ -99,19 +91,16 @@ describe("a different phrase", () => {
 
 describe("the wire contract", () => {
   it("pins the three passphrase labels, each distinct from invite mode's", () => {
-    // Literals: a client on another label meets nobody, and fails as if nobody were there.
     expect(ROOM_HANDLE_LABEL).toBe("termino/room/v2");
     expect(PASSPHRASE_CHANNEL_LABEL).toBe("termino/passphrase/v2");
     expect(PASSPHRASE_SESSION_LABEL).toBe("termino/session/passphrase/v2");
   });
 
   it("gives a room the address HKDF gives it, checked with node:crypto rather than @noble", () => {
-    // hkdfSync("sha256", "silver-and-ana", <empty salt>, "termino/room/v2", 16)
     expect(deriveRoomHandle(ROOM)).toBe("8dd075f2904541a30d8406768e385bcf");
   });
 
   it("builds the generator from the phrase and a channel identifier of label then room", () => {
-    // The identifier spelt out byte by byte: lv_cat(label, room) with one-byte lengths.
     const channelIdentifier = concatBytes(
       Uint8Array.of(21),
       new TextEncoder().encode("termino/passphrase/v2"),
@@ -129,13 +118,11 @@ describe("the wire contract", () => {
 
 describe("the room's address", () => {
   it("does not depend on the phrase, so the relay sees nothing derived from it", () => {
-    // A handle derived from the phrase would be v1's offline oracle again.
     expect(deriveRoomHandle(ROOM)).toMatch(/^[0-9a-f]{32}$/);
     expect(normalizeRoom(" Ünïcode ROOM ")).toBe("ünïcode room");
   });
 
   it("is never an invite's address, even built from the same bytes", () => {
-    // Sixteen characters of room name are sixteen bytes, the size of an invite's secret.
     const room = "sixteen-char-rm!";
     expect(deriveRoomHandle(room)).not.toBe(deriveHandle(new TextEncoder().encode(room)));
   });

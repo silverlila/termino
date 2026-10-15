@@ -1,12 +1,3 @@
-/**
- * The start screen: a name, then a choice between starting a chat, joining one with an
- * invite, and meeting in a room on a passphrase both people already know.
- *
- * One input or list is on screen at a time, and each step remounts its input by key, so
- * focus never has to be handed between widgets and a draft never leaks into the next
- * step. The inputs are uncontrolled for the same reason as the composer's.
- */
-
 import type { InputRenderable } from "@opentui/core";
 import { useKeyboard } from "@opentui/react";
 import { useRef, useState } from "react";

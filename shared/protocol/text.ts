@@ -6,7 +6,9 @@
  * Encryption is no defence — the attacker legitimately holds the key.
  *
  * JavaScript's /\s/u does not match zero-width characters, so they need a pattern of
- * their own or two nicknames spelt differently render identically.
+ * their own or two nicknames spelt differently render identically. NFKC keeps them too,
+ * so a room name carrying one would derive a different handle from the same name typed
+ * plainly.
  */
 
 export const MAX_BODY_BYTES = 1900;
@@ -14,8 +16,6 @@ export const MAX_NICK_BYTES = 32;
 export const MAX_ROOM_BYTES = 64;
 export const MAX_PASSPHRASE_BYTES = 256;
 
-// Passphrase mode stops offline guessing, not online guessing: whoever runs the relay gets
-// one try per session. Too short a phrase is found in a handful of tries.
 export const MIN_PASSPHRASE_CHARACTERS = 10;
 
 const CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]/u;
@@ -35,8 +35,6 @@ export function nickProblem(nick: string): string | null {
   );
 }
 
-/** Text nobody vetted — an error that quotes what was pasted — made safe to draw, with
- * each control character named in its place rather than executed. */
 export function visible(text: string): string {
   return text.replace(EVERY_CONTROL_PATTERN, (character) => `<${codePointName(character)}>`);
 }
@@ -46,8 +44,6 @@ export function roomProblem(room: string): string | null {
   return sizeProblem("room", room, MAX_ROOM_BYTES) ?? controlProblem("room", room) ?? zeroWidthProblem(room);
 }
 
-// Normalisation keeps zero-width characters, so a room name carrying one derives another
-// handle than the same name typed plainly, and each side waits alone with no sign why.
 function zeroWidthProblem(room: string): string | null {
   const found = ZERO_WIDTH_PATTERN.exec(room);
   if (found === null) return null;
@@ -56,8 +52,6 @@ function zeroWidthProblem(room: string): string | null {
 }
 
 export function passphraseProblem(passphrase: string): string | null {
-  // Counted as the exchange will see it: five decomposed "é" are ten code points typed
-  // but five characters keyed.
   const length = graphemes(passphrase.normalize("NFKC").trim()).length;
   if (length < MIN_PASSPHRASE_CHARACTERS) {
     return `a passphrase needs at least ${MIN_PASSPHRASE_CHARACTERS} characters — a few words you both remember`;
@@ -65,7 +59,6 @@ export function passphraseProblem(passphrase: string): string | null {
   return sizeProblem("passphrase", passphrase, MAX_PASSPHRASE_BYTES) ?? controlProblem("passphrase", passphrase);
 }
 
-/** What a person counts as one character: "👍🏽" and a decomposed "é" are one each. */
 export function graphemes(text: string): string[] {
   return [...new Intl.Segmenter().segment(text)].map((part) => part.segment);
 }
