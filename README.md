@@ -20,8 +20,8 @@ nothing is written to disk — not even by termino itself.
 
 > ⚠ **This is unaudited software.** Nobody outside this project has reviewed how these
 > primitives were assembled into a protocol, and assembly is where the mistakes live. Read
-> [THREAT-MODEL.md](THREAT-MODEL.md) — it says in plain words who this protects you from and
-> who it does not — before trusting it with anything that would hurt to lose.
+> [what it does not protect you against](#what-termino-does-not-protect-you-against) before
+> trusting it with anything that would hurt to lose.
 
 ## Running it
 
@@ -83,7 +83,6 @@ conversation, as a self-hosted one usually is, then everyone who connects to it 
 in that conversation. The client dials the
 relay **directly**: there is no proxy option and no Tor support in this version, so the real
 addresses of both ends reach that host, and reach anyone who seizes, subpoenas or shares it.
-`THREAT-MODEL.md` sets out what that does and does not expose.
 
 ## Who you are talking to
 
@@ -143,8 +142,7 @@ out loud.
 
 ## What Termino does not protect you against
 
-Read this section before trusting it with anything. [THREAT-MODEL.md](THREAT-MODEL.md) says the
-same things at length, with the reasoning, and adds who each of them lets in.
+Read this section before trusting it with anything.
 
 - **Messages already sent are unrecoverable — the live session is not.** Each message gets its own
   key, which is derived, used once, and destroyed. Nobody can recompute it afterwards, including

@@ -75,7 +75,7 @@ describe("the chat screen", () => {
     const frame = screen.captureCharFrame();
     expect(frame).toContain("unaudited");
     expect(frame).toContain("no external security review");
-    expect(frame).toContain("THREAT-MODEL.md");
+    expect(frame).toContain("see the README");
   });
 
   it("keeps the unaudited banner up once a session is established", async () => {
